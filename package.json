@@ -1,0 +1,19 @@
+{
+  "name": "ira-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:admin": "npm run dev --workspace @ira/admin-portal",
+    "build:admin": "npm run build --workspace @ira/admin-portal",
+    "dev:web-chat": "npm run dev --workspace @ira/web-chat",
+    "build:web-chat": "npm run build --workspace @ira/web-chat",
+    "dev:voice-console": "npm run dev --workspace @ira/voice-console",
+    "build:voice-console": "npm run build --workspace @ira/voice-console",
+    "dev:orchestrator": "python -m uvicorn app.main:app --reload --app-dir services/orchestrator",
+    "test:orchestrator": "python -m pytest services/orchestrator/tests"
+  }
+}

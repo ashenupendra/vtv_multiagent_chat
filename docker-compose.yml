@@ -1,0 +1,90 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: infra/docker/orchestrator/Dockerfile
+    env_file:
+      - .env
+    environment:
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8000:8000"
+    depends_on:
+      - chroma
+      - otel-collector
+    volumes:
+      - ./services/orchestrator:/app/services/orchestrator
+
+  admin-portal:
+    build:
+      context: .
+      dockerfile: infra/docker/admin-portal/Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - orchestrator
+
+  web-chat:
+    build:
+      context: .
+      dockerfile: infra/docker/web-chat/Dockerfile
+    ports:
+      - "3001:80"
+    depends_on:
+      - orchestrator
+
+  voice-console:
+    build:
+      context: .
+      dockerfile: infra/docker/voice-console/Dockerfile
+    ports:
+      - "3002:80"
+    depends_on:
+      - orchestrator
+
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/data
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.105.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./infra/observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3003:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  chroma-data:
+  grafana-data:
