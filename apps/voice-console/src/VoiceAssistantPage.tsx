@@ -484,7 +484,8 @@ export function VoiceAssistantPage() {
       ? "Listening..."
       : assistantSpeaking
         ? "Responding..."
-        : "Tap to Talk";
+        : "Tap to talk";
+  const hintText = listeningState === "listening" || assistantSpeaking ? "Tap again to stop" : "";
   const micConnected =
     connectionState === "connecting" ||
     connectionState === "connected" ||
@@ -522,7 +523,7 @@ export function VoiceAssistantPage() {
               </div>
               <div className="va-wave-caption">
                 <p className="va-state">{stateText}</p>
-                <p className="va-hint">Tap again to stop</p>
+                {hintText ? <p className="va-hint">{hintText}</p> : null}
               </div>
             </div>
           </div>
