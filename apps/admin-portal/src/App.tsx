@@ -1,12 +1,16 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import {
+  type CrawlJobCreateResponse,
   createIraApiClient,
   type RouteConversationResponse,
+  type WebsiteCrawlStatusResponse,
   type WebsiteDocumentDeleteResponse,
+  type WebsiteDetailsResponse,
   type WebsiteDocumentListResponse,
   type WebsiteDocumentQueryResponse,
   type WebsiteDocumentsUpsertResponse,
+  type WebsiteListResponse,
   type WebsiteOnboardingResponse,
 } from "@ira/agents-sdk";
 import {
@@ -62,6 +66,7 @@ export default function App() {
   const [documentListLoading, setDocumentListLoading] = useState(false);
   const [routeLoading, setRouteLoading] = useState(false);
   const [queryLoading, setQueryLoading] = useState(false);
+  const [crawlActionLoading, setCrawlActionLoading] = useState(false);
   const [sessionChecking, setSessionChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -76,6 +81,11 @@ export default function App() {
   const [deleteResult, setDeleteResult] = useState<WebsiteDocumentDeleteResponse | null>(null);
   const [queryResult, setQueryResult] = useState<WebsiteDocumentQueryResponse | null>(null);
   const [routeResult, setRouteResult] = useState<RouteConversationResponse | null>(null);
+  const [websiteDetails, setWebsiteDetails] = useState<WebsiteDetailsResponse | null>(null);
+  const [crawlStatus, setCrawlStatus] = useState<WebsiteCrawlStatusResponse | null>(null);
+  const [latestCrawlJob, setLatestCrawlJob] = useState<CrawlJobCreateResponse | null>(null);
+  const [websiteList, setWebsiteList] = useState<WebsiteListResponse["websites"]>([]);
+  const [websiteListLoading, setWebsiteListLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [sessionUsername, setSessionUsername] = useState<string | null>(null);
 
@@ -95,6 +105,25 @@ export default function App() {
     [form.allowedDomains],
   );
   const resolvedWebsiteId = activeWebsiteId || result?.website_id || "";
+
+  function applyWebsiteDetails(details: WebsiteDetailsResponse) {
+    setWebsiteDetails(details);
+    setActiveWebsiteId(details.website_id);
+    setForm({
+      websiteUrl: details.website_url ?? defaultPayload.websiteUrl,
+      displayName: details.display_name ?? defaultPayload.displayName,
+      allowedDomains:
+        details.allowed_domains.length > 0
+          ? details.allowed_domains.join(", ")
+          : defaultPayload.allowedDomains,
+      crawlDepth: details.crawl_depth ?? defaultPayload.crawlDepth,
+      promptOverride: details.prompt_override ?? "",
+    });
+  }
+
+  function applyCrawlStatus(status: WebsiteCrawlStatusResponse) {
+    setCrawlStatus(status);
+  }
 
   useEffect(() => {
     async function restoreSession() {
@@ -120,6 +149,15 @@ export default function App() {
 
     void restoreSession();
   }, [apiBaseUrl]);
+
+  useEffect(() => {
+    if (!token) {
+      setWebsiteList([]);
+      return;
+    }
+
+    void loadWebsiteList();
+  }, [token]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -150,6 +188,9 @@ export default function App() {
     setDeleteResult(null);
     setQueryResult(null);
     setRouteResult(null);
+    setWebsiteDetails(null);
+    setCrawlStatus(null);
+    setLatestCrawlJob(null);
     setActiveWebsiteId("");
   }
 
@@ -173,6 +214,41 @@ export default function App() {
       });
       setResult(body);
       setActiveWebsiteId(body.website_id);
+      setWebsiteDetails({
+        status: "loaded",
+        website_id: body.website_id,
+        display_name: form.displayName,
+        website_url: form.websiteUrl,
+        allowed_domains: recommendedDomains,
+        crawl_depth: form.crawlDepth,
+        prompt_override: form.promptOverride || null,
+        rag_collection: body.rag_collection,
+        rag_status: body.rag_status,
+        rag_endpoint: body.rag_endpoint,
+        rag_document_count: body.rag_document_count,
+        crawl_status: body.crawl_status,
+        crawl_schedule: body.crawl_schedule,
+        indexed_page_count: body.indexed_page_count,
+        indexed_chunk_count: body.indexed_chunk_count,
+        last_crawled_at: body.last_crawled_at,
+        last_error: body.last_error,
+        latest_crawl_job_id: body.latest_crawl_job_id,
+        recommended_text_model: body.recommended_text_model,
+        recommended_live_model: body.recommended_live_model,
+      });
+      setCrawlStatus({
+        status: "loaded",
+        website_id: body.website_id,
+        crawl_status: body.crawl_status,
+        crawl_schedule: body.crawl_schedule,
+        indexed_page_count: body.indexed_page_count,
+        indexed_chunk_count: body.indexed_chunk_count,
+        last_crawled_at: body.last_crawled_at,
+        last_error: body.last_error,
+        latest_crawl_job_id: body.latest_crawl_job_id,
+        jobs: [],
+      });
+      await loadWebsiteList();
     } catch (submitError) {
       setError(
         submitError instanceof Error
@@ -181,6 +257,99 @@ export default function App() {
       );
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadWebsiteDetails(websiteId: string) {
+    setLoading(true);
+    setError(null);
+
+    try {
+      if (!token) {
+        throw new Error("Login is required before loading saved website details.");
+      }
+      if (!websiteId) {
+        throw new Error("Set an active website ID before loading saved website details.");
+      }
+
+      const details = await authenticatedClient.getWebsiteDetails(websiteId);
+      const status = await authenticatedClient.getWebsiteCrawlStatus(websiteId, 10);
+      applyWebsiteDetails(details);
+      applyCrawlStatus(status);
+    } catch (detailsError) {
+      setError(
+        detailsError instanceof Error
+          ? detailsError.message
+          : "Unexpected website detail loading error.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadWebsiteCrawlStatus(websiteId: string) {
+    setCrawlActionLoading(true);
+    setError(null);
+
+    try {
+      if (!token) {
+        throw new Error("Login is required before loading crawl status.");
+      }
+      if (!websiteId) {
+        throw new Error("Set an active website ID before loading crawl status.");
+      }
+
+      const status = await authenticatedClient.getWebsiteCrawlStatus(websiteId, 10);
+      applyCrawlStatus(status);
+    } catch (crawlError) {
+      setError(
+        crawlError instanceof Error ? crawlError.message : "Unexpected crawl status loading error.",
+      );
+    } finally {
+      setCrawlActionLoading(false);
+    }
+  }
+
+  async function queueCrawlJob(websiteId: string) {
+    setCrawlActionLoading(true);
+    setError(null);
+
+    try {
+      if (!token) {
+        throw new Error("Login is required before running a crawl job.");
+      }
+      if (!websiteId) {
+        throw new Error("Set an active website ID before running a crawl job.");
+      }
+
+      const response = await authenticatedClient.queueWebsiteCrawlJob(websiteId);
+      setLatestCrawlJob(response);
+      await loadWebsiteCrawlStatus(websiteId);
+      await loadWebsiteDetails(websiteId);
+      await loadWebsiteList();
+    } catch (crawlError) {
+      setError(crawlError instanceof Error ? crawlError.message : "Unexpected crawl execution error.");
+    } finally {
+      setCrawlActionLoading(false);
+    }
+  }
+
+  async function loadWebsiteList() {
+    setWebsiteListLoading(true);
+
+    try {
+      if (!token) {
+        return;
+      }
+
+      const response = await authenticatedClient.listWebsites();
+      setWebsiteList(response.websites);
+    } catch (listError) {
+      setError(
+        listError instanceof Error ? listError.message : "Unexpected website listing error.",
+      );
+    } finally {
+      setWebsiteListLoading(false);
     }
   }
 
@@ -212,6 +381,8 @@ export default function App() {
       });
       setDocumentsResult(response);
       await loadDocuments(resolvedWebsiteId);
+      await loadWebsiteDetails(resolvedWebsiteId);
+      await loadWebsiteList();
     } catch (upsertError) {
       setDocumentError(
         upsertError instanceof Error
@@ -295,6 +466,8 @@ export default function App() {
       );
       setDeleteResult(response);
       await loadDocuments(resolvedWebsiteId);
+      await loadWebsiteDetails(resolvedWebsiteId);
+      await loadWebsiteList();
     } catch (deleteError) {
       setDocumentError(
         deleteError instanceof Error ? deleteError.message : "Unexpected document delete error.",
@@ -525,7 +698,64 @@ export default function App() {
                 placeholder="example-site-123abc"
               />
             </Field>
+            <Field label="Saved Websites">
+              <select
+                className="ira-input"
+                value={resolvedWebsiteId}
+                onChange={(event) => {
+                  const nextWebsiteId = event.target.value;
+                  setActiveWebsiteId(nextWebsiteId);
+                  if (nextWebsiteId) {
+                    void loadWebsiteDetails(nextWebsiteId);
+                  }
+                }}
+                disabled={!token || websiteListLoading}
+              >
+                <option value="">
+                  {websiteListLoading ? "Loading saved websites..." : "Select a saved website"}
+                </option>
+                {websiteList.map((website) => (
+                  <option key={website.website_id} value={website.website_id}>
+                    {website.display_name
+                      ? `${website.display_name} (${website.website_id})`
+                      : website.website_id}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <div className="action-row">
+              <PrimaryButton
+                type="button"
+                onClick={() => void loadWebsiteList()}
+                disabled={websiteListLoading || !token}
+                className="secondary-action"
+              >
+                {websiteListLoading ? "Refreshing Websites..." : "Refresh Website List"}
+              </PrimaryButton>
+              <PrimaryButton
+                type="button"
+                onClick={() => void loadWebsiteDetails(resolvedWebsiteId)}
+                disabled={loading || !token || !resolvedWebsiteId}
+                className="secondary-action"
+              >
+                {loading ? "Loading Details..." : "Load Website Details"}
+              </PrimaryButton>
+              <PrimaryButton
+                type="button"
+                onClick={() => void loadWebsiteCrawlStatus(resolvedWebsiteId)}
+                disabled={crawlActionLoading || !token || !resolvedWebsiteId}
+                className="secondary-action"
+              >
+                {crawlActionLoading ? "Loading Crawl..." : "Load Crawl Status"}
+              </PrimaryButton>
+              <PrimaryButton
+                type="button"
+                onClick={() => void queueCrawlJob(resolvedWebsiteId)}
+                disabled={crawlActionLoading || !token || !resolvedWebsiteId}
+                className="secondary-action"
+              >
+                {crawlActionLoading ? "Running Crawl..." : "Run Crawl Now"}
+              </PrimaryButton>
               <PrimaryButton
                 type="button"
                 onClick={() => void loadDocuments(resolvedWebsiteId)}
@@ -536,23 +766,100 @@ export default function App() {
               </PrimaryButton>
             </div>
 
-            {result ? (
-              <ResultCard title="Provisioning Result">
+            <div className="website-table-block">
+              <div className="website-table-header">
+                <h3>Saved Websites</h3>
+                <span>{websiteList.length} total</span>
+              </div>
+              {websiteList.length > 0 ? (
+                <div className="website-table-scroll">
+                  <table className="website-table">
+                    <thead>
+                      <tr>
+                        <th>Website ID</th>
+                        <th>Display Name</th>
+                        <th>URL</th>
+                        <th>RAG Collection</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {websiteList.map((website) => (
+                        <tr
+                          key={website.website_id}
+                          className={
+                            resolvedWebsiteId === website.website_id ? "website-row-active" : ""
+                          }
+                        >
+                          <td>
+                            <button
+                              type="button"
+                              className="table-link-button"
+                              onClick={() => {
+                                setActiveWebsiteId(website.website_id);
+                                void loadWebsiteDetails(website.website_id);
+                              }}
+                            >
+                              {website.website_id}
+                            </button>
+                          </td>
+                          <td>{website.display_name ?? "Not saved"}</td>
+                          <td>{website.website_url ?? "Not saved"}</td>
+                          <td>{website.rag_collection}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <PlaceholderCopy>
+                  {websiteListLoading
+                    ? "Loading saved websites from storage..."
+                    : "No saved websites found yet."}
+                </PlaceholderCopy>
+              )}
+            </div>
+
+            {websiteDetails ? (
+              <ResultCard title="Saved Website Details">
                 <p>
                   <span>Website ID</span>
-                  <strong>{result.website_id}</strong>
+                  <strong>{websiteDetails.website_id}</strong>
+                </p>
+                <p>
+                  <span>Display Name</span>
+                  <strong>{websiteDetails.display_name ?? "Not saved"}</strong>
+                </p>
+                <p>
+                  <span>Website URL</span>
+                  <strong>{websiteDetails.website_url ?? "Not saved"}</strong>
+                </p>
+                <p>
+                  <span>Allowed Domains</span>
+                  <strong>
+                    {websiteDetails.allowed_domains.length > 0
+                      ? websiteDetails.allowed_domains.join(", ")
+                      : "Not saved"}
+                  </strong>
+                </p>
+                <p>
+                  <span>Crawl Depth</span>
+                  <strong>{websiteDetails.crawl_depth ?? "Not saved"}</strong>
+                </p>
+                <p>
+                  <span>Prompt Override</span>
+                  <strong>{websiteDetails.prompt_override || "Not saved"}</strong>
                 </p>
                 <p>
                   <span>RAG Collection</span>
-                  <strong>{result.rag_collection}</strong>
+                  <strong>{websiteDetails.rag_collection}</strong>
                 </p>
                 <p>
                   <span>RAG Status</span>
-                  <strong>{result.rag_status}</strong>
+                  <strong>{websiteDetails.rag_status}</strong>
                 </p>
                 <p>
                   <span>RAG Endpoint</span>
-                  <strong>{result.rag_endpoint}</strong>
+                  <strong>{websiteDetails.rag_endpoint}</strong>
                 </p>
                 <p>
                   <span>Stored Documents</span>
@@ -560,23 +867,94 @@ export default function App() {
                     {deleteResult?.total_document_count ??
                       documentsResult?.total_document_count ??
                       documentListResult?.documents.length ??
-                      result.rag_document_count}
+                      websiteDetails.rag_document_count}
                   </strong>
                 </p>
                 <p>
+                  <span>Crawl Status</span>
+                  <strong>{websiteDetails.crawl_status}</strong>
+                </p>
+                <p>
+                  <span>Indexed Pages</span>
+                  <strong>{websiteDetails.indexed_page_count}</strong>
+                </p>
+                <p>
+                  <span>Indexed Chunks</span>
+                  <strong>{websiteDetails.indexed_chunk_count}</strong>
+                </p>
+                <p>
+                  <span>Latest Crawl Job</span>
+                  <strong>{websiteDetails.latest_crawl_job_id ?? "Not run yet"}</strong>
+                </p>
+                <p>
+                  <span>Last Crawled At</span>
+                  <strong>{websiteDetails.last_crawled_at ?? "Not crawled yet"}</strong>
+                </p>
+                <p>
+                  <span>Last Crawl Error</span>
+                  <strong>{websiteDetails.last_error ?? "None"}</strong>
+                </p>
+                <p>
                   <span>Text Model</span>
-                  <strong>{result.recommended_text_model}</strong>
+                  <strong>{websiteDetails.recommended_text_model}</strong>
                 </p>
                 <p>
                   <span>Live Model</span>
-                  <strong>{result.recommended_live_model}</strong>
+                  <strong>{websiteDetails.recommended_live_model}</strong>
                 </p>
               </ResultCard>
             ) : (
               <PlaceholderCopy>
-                Provision a website or paste an existing website ID to unlock document management and retrieval checks.
+                Provision a website or paste an existing website ID, then load the saved website details from storage.
               </PlaceholderCopy>
             )}
+
+            {crawlStatus ? (
+              <ResultCard title="Crawl Status">
+                <p>
+                  <span>Status</span>
+                  <strong>{crawlStatus.crawl_status}</strong>
+                </p>
+                <p>
+                  <span>Schedule</span>
+                  <strong>{crawlStatus.crawl_schedule}</strong>
+                </p>
+                <p>
+                  <span>Indexed Pages</span>
+                  <strong>{crawlStatus.indexed_page_count}</strong>
+                </p>
+                <p>
+                  <span>Indexed Chunks</span>
+                  <strong>{crawlStatus.indexed_chunk_count}</strong>
+                </p>
+                <p>
+                  <span>Latest Job</span>
+                  <strong>{crawlStatus.latest_crawl_job_id ?? "Not run yet"}</strong>
+                </p>
+                <p>
+                  <span>Last Error</span>
+                  <strong>{crawlStatus.last_error ?? "None"}</strong>
+                </p>
+                {crawlStatus.jobs.length > 0 ? (
+                  crawlStatus.jobs.map((job) => (
+                    <p key={job.job_id}>
+                      <span>{job.job_id}</span>
+                      <strong>
+                        {job.status} | queued {job.scheduled_at}
+                      </strong>
+                    </p>
+                  ))
+                ) : (
+                  <p>
+                    <span>Jobs</span>
+                    <strong>No crawl jobs have run yet.</strong>
+                  </p>
+                )}
+              </ResultCard>
+            ) : null}
+            {latestCrawlJob ? (
+              <SummaryBlock label="Latest Crawl Job" value={latestCrawlJob.job.job_id} />
+            ) : null}
           </Panel>
 
           <form className="ira-panel admin-form" onSubmit={handleDocumentQuery}>
