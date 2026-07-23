@@ -1,0 +1,31 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bgGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(558 418) rotate(126.254) scale(520.83)">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.38" stop-color="#D9DFE8" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#4A9DFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="discGradient" x1="512" y1="114" x2="512" y2="910" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#C8CDD5"/>
+      <stop offset="1" stop-color="#4A9DFF"/>
+    </linearGradient>
+    <linearGradient id="highlightGradient" x1="670" y1="174" x2="792" y2="316" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="discClip">
+      <circle cx="512" cy="512" r="410"/>
+    </clipPath>
+  </defs>
+
+  <circle cx="512" cy="512" r="430" fill="url(#bgGlow)"/>
+  <circle cx="512" cy="512" r="410" fill="url(#discGradient)"/>
+
+  <g clip-path="url(#discClip)">
+    <rect x="373" y="373" width="278" height="278" fill="#FFFFFF"/>
+    <path d="M119 723C244 723 297 676 361 622C432 562 502 482 601 407C675 351 748 312 905 312" stroke="#FFFFFF" stroke-width="41" stroke-linecap="round"/>
+    <path d="M119 786C251 786 306 737 372 681C446 619 519 538 621 461C696 404 769 365 905 365" stroke="#FFFFFF" stroke-width="41" stroke-linecap="round"/>
+  </g>
+
+  <path d="M701 188C748 215 788 255 814 302C763 278 728 256 687 216C679 208 684 179 701 188Z" fill="url(#highlightGradient)"/>
+</svg>

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createIraApiClient, type LiveConfigResponse } from "@ira/agents-sdk";
+import irasLogo from "./assets/iras-logo.svg";
 
 type ConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 type ListeningState = "idle" | "listening";
@@ -524,6 +525,7 @@ export function VoiceAssistantPage() {
                   aria-label={listeningState === "listening" || assistantSpeaking ? "Tap to stop" : "Tap to talk"}
                 >
                   <div className="va-orb-badge">
+                    <img className="va-orb-badge-logo" src={irasLogo} alt="IRAS logo" />
                   </div>
                 </button>
               </div>
