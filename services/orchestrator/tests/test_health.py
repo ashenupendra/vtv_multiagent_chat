@@ -1,6 +1,12 @@
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
+from uuid import uuid4
 
 from app.main import app
+from app.services.crawler import CrawlChunk, CrawlPage, CrawlResult
+from app.services.live import LiveProxyService
+from app.core.config import Settings
 
 client = TestClient(app)
 
@@ -29,6 +35,45 @@ def test_live_config() -> None:
     assert body["status"] in {"available", "unavailable"}
 
 
+def test_live_grounding_history_endpoint() -> None:
+    service = LiveProxyService(Settings())
+    service._store_live_grounding_event(  # type: ignore[attr-defined]
+        website_id="history-site",
+        session_id="history-session",
+        event={
+            "type": "grounding",
+            "source": "text",
+            "query": "support hours",
+            "citations": [
+                {
+                    "label": "[1]",
+                    "document_id": "doc-history",
+                    "excerpt": "Support is available during weekdays.",
+                }
+            ],
+            "matches": [
+                {
+                    "id": "doc-history",
+                    "document": "Support is available during weekdays.",
+                    "metadata": {"page_title": "Support"},
+                }
+            ],
+        },
+    )
+
+    response = client.get(
+        "/api/live/grounding-history?website_id=history-site&session_id=history-session&limit=10"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "loaded"
+    assert body["website_id"] == "history-site"
+    assert body["session_id"] == "history-session"
+    assert len(body["entries"]) >= 1
+    assert body["entries"][-1]["citations"][0]["label"] == "[1]"
+
+
 def test_route_conversation() -> None:
     response = client.post(
         "/api/orchestration/route",
@@ -50,6 +95,7 @@ def test_route_conversation() -> None:
     assert "ROLE AND ROUTING" in body["route"]["system_prompt"]
     assert "GROUNDING POLICY" in body["route"]["system_prompt"]
     assert "WEBSITE CONTEXT" in body["route"]["system_prompt"]
+    assert "citation labels" in body["route"]["system_prompt"].lower()
     assert body["route"]["website_prompt_override_applied"] is False
 
 
@@ -77,6 +123,64 @@ def test_provision_website() -> None:
     assert body["website_id"].startswith("example-site-")
     assert body["rag_status"] in {"connected", "offline_stub"}
     assert body["rag_endpoint"].startswith("http://")
+    assert body["crawl_status"] == "not_started"
+    assert body["indexed_page_count"] == 0
+    assert body["indexed_chunk_count"] == 0
+
+
+def test_public_website_list() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "change-me"},
+    )
+    token = login_response.json()["access_token"]
+
+    provision_response = client.post(
+        "/api/orchestration/websites",
+        json={
+            "website_url": "https://example.com/public",
+            "display_name": "Public Voice Site",
+            "allowed_domains": ["example.com"],
+            "crawl_depth": 2,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    website_id = provision_response.json()["website_id"]
+
+    response = client.get("/api/orchestration/websites/public")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "listed"
+    assert any(website["website_id"] == website_id for website in body["websites"])
+
+
+def test_public_website_list_does_not_scan_documents_per_website() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "change-me"},
+    )
+    token = login_response.json()["access_token"]
+
+    client.post(
+        "/api/orchestration/websites",
+        json={
+            "website_url": "https://example.com/lightweight-list",
+            "display_name": "Lightweight List",
+            "allowed_domains": ["example.com"],
+            "crawl_depth": 2,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    with patch(
+        "app.services.orchestrator.ChromaRepository.list_documents",
+        side_effect=AssertionError("list_documents should not be called for website list"),
+    ):
+        response = client.get("/api/orchestration/websites/public")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "listed"
 
 
 def test_upsert_and_query_website_documents() -> None:
@@ -155,6 +259,64 @@ def test_upsert_and_query_website_documents() -> None:
     route_body = route_response.json()
     assert route_body["route"]["website_prompt_override_applied"] is False
     assert "knowledge base" in route_body["route"]["grounding_prompt"].lower()
+    assert len(route_body["route"]["retrieval_matches"]) >= 1
+    assert "support" in route_body["route"]["retrieval_matches"][0]["document"].lower()
+    assert len(route_body["route"]["citations"]) >= 1
+    assert route_body["route"]["citations"][0]["label"] == "[1]"
+
+
+def test_voice_route_includes_retrieval_matches() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "change-me"},
+    )
+    token = login_response.json()["access_token"]
+
+    provision_response = client.post(
+        "/api/orchestration/websites",
+        json={
+            "website_url": "https://example.com/voice",
+            "display_name": "Voice Ready",
+            "allowed_domains": ["example.com"],
+            "crawl_depth": 2,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    website_id = provision_response.json()["website_id"]
+
+    client.post(
+        "/api/orchestration/documents",
+        json={
+            "website_id": website_id,
+            "documents": [
+                {
+                    "id": "voice-help",
+                    "document": "Voice support covers multilingual onboarding and support guidance.",
+                    "metadata": {"source": "seed", "page_title": "Voice Support"},
+                }
+            ],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    route_response = client.post(
+        "/api/orchestration/route",
+        json={
+            "mode": "voice",
+            "website_id": website_id,
+            "session_id": "voice-retrieval-session",
+            "message": "Can you help with multilingual onboarding?",
+            "history": [],
+            "language_hint": "en-US",
+        },
+    )
+
+    assert route_response.status_code == 200
+    route_body = route_response.json()
+    assert route_body["route"]["agent"] == "voice_processing"
+    assert len(route_body["route"]["retrieval_matches"]) >= 1
+    assert len(route_body["route"]["citations"]) >= 1
+    assert "multilingual onboarding" in route_body["route"]["grounding_prompt"].lower()
 
 
 def test_route_prompt_override_applied() -> None:
@@ -264,6 +426,225 @@ def test_list_and_delete_website_documents() -> None:
     remaining_ids = {document["id"] for document in list_after_delete.json()["documents"]}
     assert "alpha" not in remaining_ids
     assert "beta" in remaining_ids
+
+
+def test_crawl_status_and_job_queue() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "change-me"},
+    )
+    token = login_response.json()["access_token"]
+    crawl_slug = uuid4().hex[:8]
+
+    provision_response = client.post(
+        "/api/orchestration/websites",
+        json={
+            "website_url": f"https://invalid.localhost/crawl/{crawl_slug}",
+            "display_name": f"Crawl Ready {crawl_slug}",
+            "allowed_domains": ["invalid.localhost"],
+            "crawl_depth": 4,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    website_id = provision_response.json()["website_id"]
+
+    crawl_status_response = client.get(
+        f"/api/orchestration/websites/{website_id}/crawl-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert crawl_status_response.status_code == 200
+    crawl_status_body = crawl_status_response.json()
+    assert crawl_status_body["crawl_status"] == "not_started"
+    assert crawl_status_body["jobs"] == []
+
+    with patch(
+        "app.services.orchestrator.WebsiteCrawler.crawl",
+        side_effect=RuntimeError("crawl failed"),
+    ):
+        queue_response = client.post(
+            f"/api/orchestration/websites/{website_id}/crawl-jobs",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert queue_response.status_code == 200
+    queue_body = queue_response.json()
+    assert queue_body["status"] == "queued"
+    assert queue_body["job"]["status"] == "failed"
+
+    jobs_response = client.get(
+        f"/api/orchestration/websites/{website_id}/crawl-jobs?limit=10",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert jobs_response.status_code == 200
+    jobs_body = jobs_response.json()
+    assert len(jobs_body["jobs"]) >= 1
+    assert jobs_body["jobs"][0]["job_id"] == queue_body["job"]["job_id"]
+    assert jobs_body["jobs"][0]["status"] == "failed"
+
+    details_response = client.get(
+        f"/api/orchestration/websites/{website_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert details_response.status_code == 200
+    details_body = details_response.json()
+    assert details_body["crawl_status"] == "failed"
+    assert details_body["latest_crawl_job_id"] == queue_body["job"]["job_id"]
+
+
+def test_crawl_job_executes_and_ingests_documents() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "change-me"},
+    )
+    token = login_response.json()["access_token"]
+    crawl_slug = uuid4().hex[:8]
+
+    provision_response = client.post(
+        "/api/orchestration/websites",
+        json={
+            "website_url": f"https://example.com/{crawl_slug}",
+            "display_name": f"Crawlable Site {crawl_slug}",
+            "allowed_domains": ["example.com"],
+            "crawl_depth": 2,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    website_id = provision_response.json()["website_id"]
+
+    with patch(
+        "app.services.orchestrator.WebsiteCrawler.crawl",
+        return_value=CrawlResult(
+            pages=[
+                CrawlPage(
+                    url=f"https://example.com/{crawl_slug}",
+                    title="Home",
+                    text="IRA supports onboarding, pricing, and help-desk automation.",
+                    depth=0,
+                    content_hash="page-home",
+                ),
+                CrawlPage(
+                    url="https://example.com/about",
+                    title="About",
+                    text="IRA indexes website content into a searchable knowledge base.",
+                    depth=1,
+                    content_hash="page-about",
+                ),
+            ],
+            chunks=[
+                CrawlChunk(
+                    chunk_id="crawl:page-home:0",
+                    page_url=f"https://example.com/{crawl_slug}",
+                    page_title="Home",
+                    depth=0,
+                    chunk_index=0,
+                    chunk_count=1,
+                    text="title: Home\nurl: https://example.com/home\ntext: IRA supports onboarding, pricing, and help-desk automation.",
+                    content_hash="page-home",
+                ),
+                CrawlChunk(
+                    chunk_id="crawl:page-about:0",
+                    page_url="https://example.com/about",
+                    page_title="About",
+                    depth=1,
+                    chunk_index=0,
+                    chunk_count=1,
+                    text="title: About\nurl: https://example.com/about\ntext: IRA indexes website content into a searchable knowledge base.",
+                    content_hash="page-about",
+                ),
+            ],
+            pages_discovered=2,
+            pages_crawled=2,
+            pages_failed=0,
+        ),
+    ):
+        queue_response = client.post(
+            f"/api/orchestration/websites/{website_id}/crawl-jobs",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert queue_response.status_code == 200
+    queue_body = queue_response.json()
+    assert queue_body["job"]["status"] == "completed"
+    assert queue_body["job"]["pages_crawled"] == 2
+    assert queue_body["job"]["indexed_chunk_count"] >= 2
+
+    crawl_status_response = client.get(
+        f"/api/orchestration/websites/{website_id}/crawl-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert crawl_status_response.status_code == 200
+    crawl_status_body = crawl_status_response.json()
+    assert crawl_status_body["crawl_status"] == "completed"
+    assert crawl_status_body["indexed_page_count"] == 2
+    assert crawl_status_body["indexed_chunk_count"] >= 2
+
+    documents_response = client.get(
+        f"/api/orchestration/documents?website_id={website_id}&limit=20",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert documents_response.status_code == 200
+    documents_body = documents_response.json()
+    assert len(documents_body["documents"]) >= 2
+    assert all(document["metadata"].get("source") == "crawl" for document in documents_body["documents"])
+
+
+def test_crawl_job_with_empty_result_is_marked_failed() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "change-me"},
+    )
+    token = login_response.json()["access_token"]
+    crawl_slug = uuid4().hex[:8]
+
+    provision_response = client.post(
+        "/api/orchestration/websites",
+        json={
+            "website_url": f"https://example.com/{crawl_slug}",
+            "display_name": f"Empty Crawl {crawl_slug}",
+            "allowed_domains": ["example.com"],
+            "crawl_depth": 2,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    website_id = provision_response.json()["website_id"]
+
+    with patch(
+        "app.services.orchestrator.WebsiteCrawler.crawl",
+        return_value=CrawlResult(
+            pages=[],
+            chunks=[],
+            pages_discovered=1,
+            pages_crawled=0,
+            pages_failed=0,
+        ),
+    ):
+        queue_response = client.post(
+            f"/api/orchestration/websites/{website_id}/crawl-jobs",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert queue_response.status_code == 200
+    queue_body = queue_response.json()
+    assert queue_body["job"]["status"] == "failed"
+    assert "without extracting any indexable website content" in (
+        queue_body["job"]["error_message"] or ""
+    )
+
+    crawl_status_response = client.get(
+        f"/api/orchestration/websites/{website_id}/crawl-status",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert crawl_status_response.status_code == 200
+    crawl_status_body = crawl_status_response.json()
+    assert crawl_status_body["crawl_status"] == "failed"
+    assert crawl_status_body["indexed_page_count"] == 0
+    assert crawl_status_body["indexed_chunk_count"] == 0
+    assert "without extracting any indexable website content" in (
+        crawl_status_body["last_error"] or ""
+    )
 
 
 def test_login_and_session() -> None:

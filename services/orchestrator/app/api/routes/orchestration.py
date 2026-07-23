@@ -3,10 +3,15 @@ from fastapi import APIRouter, Depends
 from app.api.deps import get_current_admin_session
 from app.core.config import get_settings
 from app.schemas.orchestration import (
+    CrawlJobCreateResponse,
+    CrawlJobListResponse,
     OrchestrationRequest,
     OrchestrationResponse,
+    WebsiteCrawlStatusResponse,
     WebsiteDocumentDeleteResponse,
     WebsiteDocumentListResponse,
+    WebsiteDetailsResponse,
+    WebsiteListResponse,
     WebsiteDocumentQueryRequest,
     WebsiteDocumentQueryResponse,
     WebsiteDocumentsUpsertRequest,
@@ -33,6 +38,58 @@ def provision_website(
 ) -> WebsiteOnboardingResponse:
     service = OrchestratorService(get_settings())
     return service.provision_website(request)
+
+
+@router.get("/websites", response_model=WebsiteListResponse)
+def list_websites(
+    _: AdminSession = Depends(get_current_admin_session),
+) -> WebsiteListResponse:
+    service = OrchestratorService(get_settings())
+    return service.list_websites()
+
+
+@router.get("/websites/public", response_model=WebsiteListResponse)
+def list_public_websites() -> WebsiteListResponse:
+    service = OrchestratorService(get_settings())
+    return service.list_websites()
+
+
+@router.get("/websites/{website_id}", response_model=WebsiteDetailsResponse)
+def get_website_details(
+    website_id: str,
+    _: AdminSession = Depends(get_current_admin_session),
+) -> WebsiteDetailsResponse:
+    service = OrchestratorService(get_settings())
+    return service.get_website_details(website_id)
+
+
+@router.get("/websites/{website_id}/crawl-status", response_model=WebsiteCrawlStatusResponse)
+def get_website_crawl_status(
+    website_id: str,
+    limit: int = 10,
+    _: AdminSession = Depends(get_current_admin_session),
+) -> WebsiteCrawlStatusResponse:
+    service = OrchestratorService(get_settings())
+    return service.get_website_crawl_status(website_id, limit=limit)
+
+
+@router.post("/websites/{website_id}/crawl-jobs", response_model=CrawlJobCreateResponse)
+def queue_crawl_job(
+    website_id: str,
+    _: AdminSession = Depends(get_current_admin_session),
+) -> CrawlJobCreateResponse:
+    service = OrchestratorService(get_settings())
+    return service.queue_crawl_job(website_id)
+
+
+@router.get("/websites/{website_id}/crawl-jobs", response_model=CrawlJobListResponse)
+def list_crawl_jobs(
+    website_id: str,
+    limit: int = 20,
+    _: AdminSession = Depends(get_current_admin_session),
+) -> CrawlJobListResponse:
+    service = OrchestratorService(get_settings())
+    return service.list_crawl_jobs(website_id, limit=limit)
 
 
 @router.post("/documents", response_model=WebsiteDocumentsUpsertResponse)
