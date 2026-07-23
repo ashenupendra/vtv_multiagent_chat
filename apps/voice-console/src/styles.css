@@ -221,6 +221,17 @@ body {
   place-items: center;
 }
 
+.va-orb-core-button {
+  appearance: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.va-orb-core-button:focus-visible {
+  outline: 2px solid rgba(191, 219, 254, 0.9);
+  outline-offset: 6px;
+}
+
 .va-orb-badge {
   width: 128px;
   height: 128px;

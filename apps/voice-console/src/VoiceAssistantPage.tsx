@@ -517,10 +517,15 @@ export function VoiceAssistantPage() {
                   <span />
                   <span />
                 </div>
-                <div className="va-orb-core">
+                <button
+                  type="button"
+                  className="va-orb-core va-orb-core-button"
+                  onClick={handleTap}
+                  aria-label={listeningState === "listening" || assistantSpeaking ? "Tap to stop" : "Tap to talk"}
+                >
                   <div className="va-orb-badge">
                   </div>
-                </div>
+                </button>
               </div>
               <div className="va-wave-caption">
                 <p className="va-state">{stateText}</p>
