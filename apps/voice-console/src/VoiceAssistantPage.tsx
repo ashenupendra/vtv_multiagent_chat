@@ -515,10 +515,8 @@ export function VoiceAssistantPage() {
                   <span />
                   <span />
                 </div>
-                <div className="va-rings" />
                 <div className="va-orb-core">
                   <div className="va-orb-badge">
-                    <div className="va-orb-badge-mark" />
                   </div>
                 </div>
               </div>
