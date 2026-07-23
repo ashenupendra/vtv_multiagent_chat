@@ -465,15 +465,6 @@ export function VoiceAssistantPage() {
     }
   }
 
-  const statusText =
-    connectionState === "connected"
-      ? "Connected"
-      : connectionState === "connecting"
-        ? "Connecting"
-        : connectionState === "error"
-          ? "Error"
-          : "Disconnected";
-
   const pulseState =
     listeningState === "listening"
       ? "listening"
@@ -493,41 +484,70 @@ export function VoiceAssistantPage() {
       ? "Listening..."
       : assistantSpeaking
         ? "Responding..."
-        : "Ready";
+        : "Tap to Talk";
+  const micConnected =
+    connectionState === "connecting" ||
+    connectionState === "connected" ||
+    listeningState === "listening" ||
+    assistantSpeaking;
 
   return (
     <main className="va-root">
       <section className="va-shell">
         <section className="va-card">
-          <div className="va-wave-panel">
-            <div className={`va-orb-stage va-orb-stage--${pulseState}`} style={orbStyle}>
-              <div className="va-rings" />
-              <div className="va-orb-core" />
-            </div>
-            <div className="va-wave-caption">
-              <p className="va-state">{stateText}</p>
-              <p className="va-hint">Tap again to stop</p>
+          <div className="va-hero">
+            <div className="va-wave-panel">
+              <div className={`va-orb-stage va-orb-stage--${pulseState}`} style={orbStyle}>
+                <div className="va-orb-halo va-orb-halo--outer" />
+                <div className="va-orb-halo va-orb-halo--mid" />
+                <div className="va-orb-halo va-orb-halo--inner" />
+                <div className="va-orb-side va-orb-side--left" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span className="va-orb-side-pill" />
+                  <span />
+                  <span />
+                </div>
+                <div className="va-orb-side va-orb-side--right" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span className="va-orb-side-pill" />
+                  <span />
+                  <span />
+                </div>
+                <div className="va-rings" />
+                <div className="va-orb-core">
+                  <div className="va-orb-badge">
+                    <div className="va-orb-badge-mark" />
+                  </div>
+                </div>
+              </div>
+              <div className="va-wave-caption">
+                <p className="va-state">{stateText}</p>
+                <p className="va-hint">Tap again to stop</p>
+              </div>
             </div>
           </div>
 
-          <div className="va-status-card">
-            <div className="va-status-icon" />
-            <div className="va-status-copy">
-              <span>{`RAG: ${fixedWebsiteId}`}</span>
-              <strong>{statusText}</strong>
+          {error || liveConfig?.reason ? (
+            <div className="va-errors">
+              {error ? <p className="va-error">{error}</p> : null}
+              {liveConfig?.reason ? <p className="va-error">{liveConfig.reason}</p> : null}
             </div>
+          ) : null}
+
+          <div className="va-footer">
+            <button type="button" className="va-talk-button" onClick={handleTap}>
+              <div
+                className={`va-mic ${micConnected ? "va-mic--connected" : "va-mic--disconnected"}`}
+                aria-hidden="true"
+              />
+              <div className="va-talk-copy">
+                <strong>Tap to Talk</strong>
+                <span>Tap again to stop</span>
+              </div>
+            </button>
           </div>
-
-          {error ? <p className="va-error">{error}</p> : null}
-          {liveConfig?.reason ? <p className="va-error">{liveConfig.reason}</p> : null}
-
-          <button type="button" className="va-talk-button" onClick={handleTap}>
-            <div className="va-mic" aria-hidden="true" />
-            <div className="va-talk-copy">
-              <strong>Tap to Talk</strong>
-              <span>Tap again to stop</span>
-            </div>
-          </button>
         </section>
       </section>
     </main>
