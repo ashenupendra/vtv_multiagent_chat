@@ -486,6 +486,7 @@ export function VoiceAssistantPage() {
         ? "Responding..."
         : "Tap to talk";
   const hintText = listeningState === "listening" || assistantSpeaking ? "Tap again to stop" : "";
+  const buttonPrimaryText = listeningState === "listening" || assistantSpeaking ? "Tap to stop" : "Tap to Talk";
   const micConnected =
     connectionState === "connecting" ||
     connectionState === "connected" ||
@@ -542,8 +543,7 @@ export function VoiceAssistantPage() {
                 aria-hidden="true"
               />
               <div className="va-talk-copy">
-                <strong>Tap to Talk</strong>
-                <span>Tap again to stop</span>
+                <span>{buttonPrimaryText}</span>
               </div>
             </button>
           </div>
