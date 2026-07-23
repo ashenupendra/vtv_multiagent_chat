@@ -156,11 +156,19 @@ class LiveProxyService:
                 "model": f"models/{model}",
                 "generationConfig": {
                     "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {
+                                "voiceName": self._settings.google_runtime.tts_voice.split("-")[-1],
+                            }
+                        }
+                    },
                 },
                 "systemInstruction": {
                     "parts": [{"text": prompt_blueprint.composed_system_prompt}],
                 },
                 "inputAudioTranscription": {},
+                "outputAudioTranscription": {},
             }
         }
 

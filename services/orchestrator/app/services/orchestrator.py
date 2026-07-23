@@ -8,6 +8,8 @@ from app.schemas.orchestration import (
     AgentSelection,
     OrchestrationRequest,
     OrchestrationResponse,
+    WebsiteListResponse,
+    WebsiteSummary,
     WebsiteDocumentQueryRequest,
     WebsiteDocumentQueryResponse,
     WebsiteDocumentDeleteResponse,
@@ -118,6 +120,22 @@ class OrchestratorService:
             recommended_text_model=self._settings.google_runtime.text_model,
             recommended_live_model=self._settings.google_runtime.live_model,
         )
+
+    def list_websites(self) -> WebsiteListResponse:
+        bindings = self._rag_repository.list_website_collections()
+        websites = [
+            WebsiteSummary(
+                website_id=binding.website_id,
+                display_name=binding.metadata.get("display_name") or None,
+                website_url=binding.metadata.get("website_url") or None,
+                rag_collection=binding.collection_name,
+                rag_status=binding.status,
+                rag_endpoint=binding.endpoint,
+                rag_document_count=binding.document_count,
+            )
+            for binding in sorted(bindings, key=lambda item: item.website_id)
+        ]
+        return WebsiteListResponse(status="listed", websites=websites)
 
     def list_website_documents(
         self,

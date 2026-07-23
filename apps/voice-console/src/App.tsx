@@ -4,6 +4,7 @@ import {
   createIraApiClient,
   type LiveConfigResponse,
   type RouteConversationResponse,
+  type WebsiteSummary,
 } from "@ira/agents-sdk";
 import {
   AppShell,
@@ -16,6 +17,8 @@ import {
   SummaryBlock,
   TextArea,
 } from "@ira/ui";
+
+import { VoiceAssistantPage } from "./VoiceAssistantPage";
 
 type TranscriptEntry = {
   id: string;
@@ -36,12 +39,17 @@ type LiveServerEvent =
   | { type: "error"; message: string }
   | { type: "audio_chunk"; data: string; mimeType: string };
 
-export default function App() {
+const websiteIdStorageKey = "ira-voice-console-website-id";
+
+function VoiceConsoleDebug() {
   const [loading, setLoading] = useState(false);
   const [micLoading, setMicLoading] = useState(false);
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RouteConversationResponse | null>(null);
+  const [websiteId, setWebsiteId] = useState("iras-singapore-128e32");
+  const [knownWebsites, setKnownWebsites] = useState<WebsiteSummary[]>([]);
+  const [websiteLoading, setWebsiteLoading] = useState(false);
   const [transportState, setTransportState] = useState("idle");
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [transcriptDraft, setTranscriptDraft] = useState(
@@ -74,6 +82,49 @@ export default function App() {
       mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
+
+  useEffect(() => {
+    const storedWebsiteId = window.localStorage.getItem(websiteIdStorageKey);
+    if (storedWebsiteId) {
+      setWebsiteId(storedWebsiteId);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setWebsiteLoading(true);
+    client
+      .listWebsites()
+      .then((response) => {
+        if (!active) return;
+        setKnownWebsites(response.websites ?? []);
+        const storedWebsiteId = window.localStorage.getItem(websiteIdStorageKey);
+        if (!storedWebsiteId && response.websites?.length) {
+          setWebsiteId(response.websites[0].website_id);
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setKnownWebsites([]);
+      })
+      .finally(() => {
+        if (!active) return;
+        setWebsiteLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
+  useEffect(() => {
+    const trimmedWebsiteId = websiteId.trim();
+    if (trimmedWebsiteId) {
+      window.localStorage.setItem(websiteIdStorageKey, trimmedWebsiteId);
+    } else {
+      window.localStorage.removeItem(websiteIdStorageKey);
+    }
+  }, [websiteId]);
 
   function appendTranscript(role: TranscriptEntry["role"], content: string) {
     setTranscriptLog((current) => [
@@ -189,11 +240,15 @@ export default function App() {
     setError(null);
 
     try {
+      if (!websiteId.trim()) {
+        throw new Error("Enter a website ID before starting the voice session.");
+      }
+
       liveSocketRef.current?.close();
       liveSessionVersionRef.current += 1;
       const response = await client.routeConversation({
         mode: "voice",
-        website_id: "iras-singapore-128e32",
+        website_id: websiteId.trim(),
         session_id: "voice-console-session",
         message: "Start a multilingual voice support session.",
         history: [],
@@ -241,7 +296,7 @@ export default function App() {
         if (liveSessionVersionRef.current !== sessionVersion) {
           return;
         }
-        if (!event.wasClean || event.reason) {
+        if (event.code !== 1000 && (!event.wasClean || event.reason)) {
           setError(
             event.reason
               ? `Gemini Live session closed: ${event.reason}`
@@ -290,15 +345,33 @@ export default function App() {
     }
   }
 
-  function handleStartCapture() {
+  function resetPlayback() {
+    nextStartTimeRef.current = 0;
+    void playbackContextRef.current?.close();
+    playbackContextRef.current = null;
+  }
+
+  async function handleStartCapture() {
     const stream = mediaStreamRef.current;
     if (!stream) {
       setError("Enable microphone access before starting capture.");
       return;
     }
+
+    if (!liveSocketRef.current || liveSocketRef.current.readyState !== WebSocket.OPEN) {
+      await handleStartSession();
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if (liveSocketRef.current?.readyState === WebSocket.OPEN) {
+          break;
+        }
+        await sleep(100);
+      }
+    }
+
     const socket = liveSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setError("Prepare the live session before streaming microphone audio.");
+      setError("Gemini Live session is not ready. Try Prepare Voice Session again.");
+      setTransportState("error");
       return;
     }
 
@@ -310,6 +383,7 @@ export default function App() {
       return;
     }
 
+    resetPlayback();
     streamedChunkCountRef.current = 0;
     const audioContext = new AudioContextCtor();
     const source = audioContext.createMediaStreamSource(stream);
@@ -351,10 +425,20 @@ export default function App() {
     processorNodeRef.current = null;
     sourceNodeRef.current = null;
     audioContextRef.current = null;
-    liveSocketRef.current?.send(JSON.stringify({ type: "audio_end" }));
+    resetPlayback();
+    streamedChunkCountRef.current = 0;
+
+    const socket = liveSocketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "audio_end" }));
+      socket.close(1000, "capture stopped");
+    }
+    liveSocketRef.current = null;
+    liveSessionVersionRef.current += 1;
     setAudioSummary(`Streamed ${streamedChunkCountRef.current} PCM chunks to Gemini Live.`);
-    setTransportState("audio-ended");
+    setTransportState("capture-stopped");
     setRecording(false);
+    appendTranscript("system", "Capture stopped. Live session was reset.");
   }
 
   async function handleSendTranscript(event: FormEvent<HTMLFormElement>) {
@@ -390,7 +474,34 @@ export default function App() {
     >
       <section className="voice-layout">
         <Panel title="Session Controls" className="voice-panel">
-          <SummaryBlock label="Target Website" value="iras-singapore-128e32" />
+          {knownWebsites.length ? (
+            <Field label="Select Website">
+              <select
+                value={websiteId.trim()}
+                onChange={(event) => setWebsiteId(event.target.value)}
+              >
+                {knownWebsites.map((website) => (
+                  <option key={website.website_id} value={website.website_id}>
+                    {website.display_name
+                      ? `${website.display_name} (${website.website_id})`
+                      : website.website_id}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : websiteLoading ? (
+            <SummaryBlock label="Websites" value="Loading..." />
+          ) : null}
+          <Field label="Website ID">
+            <input
+              type="text"
+              value={websiteId}
+              onChange={(event) => setWebsiteId(event.target.value)}
+              placeholder="Enter provisioned website ID"
+              required
+            />
+          </Field>
+          <SummaryBlock label="Target Website" value={websiteId.trim() || "Not set"} />
           <SummaryBlock label="Mode" value="voice" />
           <SummaryBlock label="Language Hint" value="en-US" />
           <SummaryBlock label="Transport" value={transportState} />
@@ -555,4 +666,15 @@ function int16ToBase64(buffer: Int16Array): string {
     binary += String.fromCharCode(bytes[index]);
   }
   return window.btoa(binary);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export default function App() {
+  const debug =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("debug") === "1";
+  return debug ? <VoiceConsoleDebug /> : <VoiceAssistantPage />;
 }

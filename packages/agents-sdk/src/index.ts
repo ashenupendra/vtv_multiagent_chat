@@ -41,6 +41,21 @@ export type WebsiteOnboardingResponse = {
   recommended_live_model: string;
 };
 
+export type WebsiteSummary = {
+  website_id: string;
+  display_name?: string | null;
+  website_url?: string | null;
+  rag_collection: string;
+  rag_status: string;
+  rag_endpoint: string;
+  rag_document_count: number;
+};
+
+export type WebsiteListResponse = {
+  status: string;
+  websites: WebsiteSummary[];
+};
+
 export type WebsiteDocumentRecord = {
   id: string;
   document: string;
@@ -197,6 +212,15 @@ export function createIraApiClient(options: ClientOptions = {}) {
         {
           method: "POST",
           body: JSON.stringify(payload),
+        },
+        options,
+      );
+    },
+    listWebsites() {
+      return request<WebsiteListResponse>(
+        "/api/orchestration/websites",
+        {
+          method: "GET",
         },
         options,
       );

@@ -5,6 +5,7 @@ from app.core.config import get_settings
 from app.schemas.orchestration import (
     OrchestrationRequest,
     OrchestrationResponse,
+    WebsiteListResponse,
     WebsiteDocumentDeleteResponse,
     WebsiteDocumentListResponse,
     WebsiteDocumentQueryRequest,
@@ -33,6 +34,12 @@ def provision_website(
 ) -> WebsiteOnboardingResponse:
     service = OrchestratorService(get_settings())
     return service.provision_website(request)
+
+
+@router.get("/websites", response_model=WebsiteListResponse)
+def list_websites() -> WebsiteListResponse:
+    service = OrchestratorService(get_settings())
+    return service.list_websites()
 
 
 @router.post("/documents", response_model=WebsiteDocumentsUpsertResponse)

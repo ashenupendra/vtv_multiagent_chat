@@ -61,6 +61,21 @@ class WebsiteOnboardingResponse(BaseModel):
     recommended_live_model: str
 
 
+class WebsiteSummary(BaseModel):
+    website_id: str
+    display_name: str | None = None
+    website_url: str | None = None
+    rag_collection: str
+    rag_status: str
+    rag_endpoint: str
+    rag_document_count: int
+
+
+class WebsiteListResponse(BaseModel):
+    status: Literal["listed"]
+    websites: list[WebsiteSummary] = Field(default_factory=list)
+
+
 class WebsiteDocumentRecord(BaseModel):
     id: str
     document: str
