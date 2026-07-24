@@ -29,6 +29,7 @@ const sensitivityConfig: Record<SensitivityLevel, { threshold: number; frames: n
 const envSensitivityLevel = (import.meta.env.VITE_VOICE_SENSITIVITY_LEVEL as string | undefined)?.toLowerCase();
 const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
+const sessionGreetingText = "How can I help today?";
 
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
@@ -484,6 +485,7 @@ export function VoiceAssistantPage() {
   async function startTalking() {
     setError(null);
     setAwaitingResponse(false);
+    setAssistantTranscript(sessionGreetingText);
     assistantTranscriptBufferRef.current = "";
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
@@ -500,6 +502,13 @@ export function VoiceAssistantPage() {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("Gemini Live session is not ready.");
     }
+
+    socket.send(
+      JSON.stringify({
+        type: "text",
+        text: 'Greet the user by saying exactly "How can I help today?" and then wait for the user response.',
+      }),
+    );
 
     const AudioContextCtor = window.AudioContext || (window as typeof window & {
       webkitAudioContext?: typeof AudioContext;
@@ -573,6 +582,7 @@ export function VoiceAssistantPage() {
 
       if (speechActive) {
         if (!userSpeechActiveRef.current) {
+          setAssistantTranscript("");
           assistantTranscriptBufferRef.current = "";
         }
         userSpeechActiveRef.current = true;
