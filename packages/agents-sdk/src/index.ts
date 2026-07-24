@@ -129,6 +129,8 @@ export type CrawlJobCreateResponse = {
   job: CrawlJobResponse;
 };
 
+export type WebsiteSummary = WebsiteSummaryResponse;
+
 export type WebsiteDocumentRecord = {
   id: string;
   document: string;

@@ -19,6 +19,8 @@ import {
   TextArea,
 } from "@ira/ui";
 
+import { VoiceAssistantPage } from "./VoiceAssistantPage";
+
 const voiceSessionId = "voice-console-session";
 
 type TranscriptEntry = {
@@ -73,7 +75,7 @@ type LiveServerEvent =
   | { type: "error"; message: string }
   | { type: "audio_chunk"; data: string; mimeType: string };
 
-export default function App() {
+function VoiceConsoleDebug() {
   const [loading, setLoading] = useState(false);
   const [micLoading, setMicLoading] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -387,7 +389,6 @@ export default function App() {
         setMicrophoneEnabled(true);
         return existingStream;
       }
-
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("This browser does not support microphone capture.");
       }
@@ -585,10 +586,20 @@ export default function App() {
     processorNodeRef.current = null;
     sourceNodeRef.current = null;
     audioContextRef.current = null;
-    liveSocketRef.current?.send(JSON.stringify({ type: "audio_end" }));
+    stopPlayback();
+    streamedChunkCountRef.current = 0;
+
+    const socket = liveSocketRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "audio_end" }));
+      socket.close(1000, "capture stopped");
+    }
+    liveSocketRef.current = null;
+    liveSessionVersionRef.current += 1;
     setAudioSummary(`Streamed ${streamedChunkCountRef.current} PCM chunks to Gemini Live.`);
-    setTransportState("audio-ended");
+    setTransportState("capture-stopped");
     setRecording(false);
+    appendTranscript("system", "Capture stopped. Live session was reset.");
   }
 
   function handleEndConversation() {
@@ -928,4 +939,11 @@ function joinTranscriptContent(current: string, next: string): string {
   }
 
   return `${current} ${next}`;
+}
+
+export default function App() {
+  const debug =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("debug") === "1";
+  return debug ? <VoiceConsoleDebug /> : <VoiceAssistantPage />;
 }

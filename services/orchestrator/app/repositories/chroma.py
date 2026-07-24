@@ -397,6 +397,55 @@ class ChromaRepository:
         payload = response.json()
         return collection_binding, self._records_from_query_payload(payload)
 
+    def list_website_collections(self) -> list[RAGCollectionBinding]:
+        collection_prefix = f"{self._settings.rag.collection_prefix}-"
+        try:
+            response = self._request("GET", self._collections_path())
+            collections = response.json()
+            if not isinstance(collections, list):
+                raise ValueError("Unexpected collection list response from Chroma.")
+
+            bindings: list[RAGCollectionBinding] = []
+            for collection in collections:
+                if not isinstance(collection, dict):
+                    continue
+                name = collection.get("name")
+                if not isinstance(name, str) or not name.startswith(collection_prefix):
+                    continue
+                website_id = name[len(collection_prefix) :]
+                metadata = self._stringify_metadata(collection.get("metadata"))
+                bindings.append(
+                    RAGCollectionBinding(
+                        website_id=website_id,
+                        collection_name=name,
+                        endpoint=self.endpoint,
+                        status="connected",
+                        document_count=0,
+                        metadata=metadata,
+                    )
+                )
+            return bindings
+        except Exception:
+            if not self._settings.rag.allow_stub_fallback:
+                raise
+
+            bindings: list[RAGCollectionBinding] = []
+            for collection_name, metadata in self._stub_collections.items():
+                if not collection_name.startswith(collection_prefix):
+                    continue
+                website_id = collection_name[len(collection_prefix) :]
+                bindings.append(
+                    RAGCollectionBinding(
+                        website_id=website_id,
+                        collection_name=collection_name,
+                        endpoint=self.endpoint,
+                        status="offline_stub",
+                        document_count=len(self._stub_documents.get(collection_name, [])),
+                        metadata=metadata,
+                    )
+                )
+            return bindings
+
     def _find_collection(self, collection_name: str) -> dict[str, object] | None:
         response = self._request("GET", self._collections_path())
         collections = response.json()
