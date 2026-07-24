@@ -36,30 +36,133 @@ export type WebsiteOnboardingResponse = {
   rag_status: string;
   rag_endpoint: string;
   rag_document_count: number;
+  crawl_status: "not_started" | "queued" | "running" | "completed" | "failed";
   crawl_schedule: string;
+  indexed_page_count: number;
+  indexed_chunk_count: number;
+  last_crawled_at: string | null;
+  last_error: string | null;
+  latest_crawl_job_id: string | null;
   recommended_text_model: string;
   recommended_live_model: string;
 };
 
-export type WebsiteSummary = {
+export type WebsiteDetailsResponse = {
+  status: "loaded";
   website_id: string;
-  display_name?: string | null;
-  website_url?: string | null;
+  display_name: string | null;
+  website_url: string | null;
+  allowed_domains: string[];
+  crawl_depth: number | null;
+  prompt_override: string | null;
   rag_collection: string;
   rag_status: string;
   rag_endpoint: string;
   rag_document_count: number;
+  crawl_status: "not_started" | "queued" | "running" | "completed" | "failed";
+  crawl_schedule: string;
+  indexed_page_count: number;
+  indexed_chunk_count: number;
+  last_crawled_at: string | null;
+  last_error: string | null;
+  latest_crawl_job_id: string | null;
+  recommended_text_model: string;
+  recommended_live_model: string;
+};
+
+export type WebsiteSummaryResponse = {
+  website_id: string;
+  display_name: string | null;
+  website_url: string | null;
+  allowed_domains: string[];
+  crawl_depth: number | null;
+  rag_collection: string;
+  rag_status: string;
+  crawl_status: "not_started" | "queued" | "running" | "completed" | "failed";
+  indexed_page_count: number;
+  indexed_chunk_count: number;
+  latest_crawl_job_id: string | null;
 };
 
 export type WebsiteListResponse = {
-  status: string;
-  websites: WebsiteSummary[];
+  status: "listed";
+  websites: WebsiteSummaryResponse[];
 };
+
+export type CrawlJobResponse = {
+  job_id: string;
+  website_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  scheduled_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  pages_discovered: number;
+  pages_crawled: number;
+  pages_failed: number;
+  indexed_page_count: number;
+  indexed_chunk_count: number;
+  error_message: string | null;
+};
+
+export type WebsiteCrawlStatusResponse = {
+  status: "loaded";
+  website_id: string;
+  crawl_status: "not_started" | "queued" | "running" | "completed" | "failed";
+  crawl_schedule: string;
+  indexed_page_count: number;
+  indexed_chunk_count: number;
+  last_crawled_at: string | null;
+  last_error: string | null;
+  latest_crawl_job_id: string | null;
+  jobs: CrawlJobResponse[];
+};
+
+export type CrawlJobListResponse = {
+  status: "listed";
+  website_id: string;
+  jobs: CrawlJobResponse[];
+};
+
+export type CrawlJobCreateResponse = {
+  status: "queued";
+  website_id: string;
+  job: CrawlJobResponse;
+};
+
+export type WebsiteSummary = WebsiteSummaryResponse;
 
 export type WebsiteDocumentRecord = {
   id: string;
   document: string;
   metadata: Record<string, string>;
+};
+
+export type CitationRecord = {
+  label: string;
+  document_id: string;
+  source?: string | null;
+  page_title?: string | null;
+  page_url?: string | null;
+  excerpt: string;
+};
+
+export type GroundingHistoryEntryResponse = {
+  type: "grounding";
+  source: string;
+  query: string;
+  turn_id: string;
+  recorded_at: string;
+  website_id: string;
+  session_id: string;
+  matches: WebsiteDocumentRecord[];
+  citations: CitationRecord[];
+};
+
+export type GroundingHistoryResponse = {
+  status: "loaded";
+  website_id: string;
+  session_id: string | null;
+  entries: GroundingHistoryEntryResponse[];
 };
 
 export type WebsiteDocumentsUpsertPayload = {
@@ -132,6 +235,8 @@ export type RouteConversationResponse = {
     grounding_prompt?: string | null;
     website_prompt?: string | null;
     website_prompt_override_applied?: boolean;
+    retrieval_matches?: WebsiteDocumentRecord[];
+    citations?: CitationRecord[];
   };
   fallback_message: string;
   observability_trace_id: string;
@@ -206,6 +311,22 @@ export function createIraApiClient(options: ClientOptions = {}) {
         options,
       );
     },
+    getGroundingHistory(websiteId: string, sessionId?: string, limit = 20) {
+      const query = new URLSearchParams({
+        website_id: websiteId,
+        limit: String(limit),
+      });
+      if (sessionId) {
+        query.set("session_id", sessionId);
+      }
+      return request<GroundingHistoryResponse>(
+        `/api/live/grounding-history?${query.toString()}`,
+        {
+          method: "GET",
+        },
+        options,
+      );
+    },
     provisionWebsite(payload: WebsiteOnboardingPayload) {
       return request<WebsiteOnboardingResponse>(
         "/api/orchestration/websites",
@@ -219,6 +340,57 @@ export function createIraApiClient(options: ClientOptions = {}) {
     listWebsites() {
       return request<WebsiteListResponse>(
         "/api/orchestration/websites",
+        {
+          method: "GET",
+        },
+        options,
+      );
+    },
+    listPublicWebsites() {
+      return request<WebsiteListResponse>(
+        "/api/orchestration/websites/public",
+        {
+          method: "GET",
+        },
+        options,
+      );
+    },
+    getWebsiteDetails(websiteId: string) {
+      return request<WebsiteDetailsResponse>(
+        `/api/orchestration/websites/${encodeURIComponent(websiteId)}`,
+        {
+          method: "GET",
+        },
+        options,
+      );
+    },
+    getWebsiteCrawlStatus(websiteId: string, limit = 10) {
+      const query = new URLSearchParams({
+        limit: String(limit),
+      });
+      return request<WebsiteCrawlStatusResponse>(
+        `/api/orchestration/websites/${encodeURIComponent(websiteId)}/crawl-status?${query.toString()}`,
+        {
+          method: "GET",
+        },
+        options,
+      );
+    },
+    queueWebsiteCrawlJob(websiteId: string) {
+      return request<CrawlJobCreateResponse>(
+        `/api/orchestration/websites/${encodeURIComponent(websiteId)}/crawl-jobs`,
+        {
+          method: "POST",
+        },
+        options,
+      );
+    },
+    listWebsiteCrawlJobs(websiteId: string, limit = 20) {
+      const query = new URLSearchParams({
+        limit: String(limit),
+      });
+      return request<CrawlJobListResponse>(
+        `/api/orchestration/websites/${encodeURIComponent(websiteId)}/crawl-jobs?${query.toString()}`,
         {
           method: "GET",
         },

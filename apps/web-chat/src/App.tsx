@@ -116,11 +116,35 @@ export default function App() {
                 <span>Prompt Override</span>
                 <strong>{result.route.website_prompt_override_applied ? "Applied" : "Not applied"}</strong>
               </p>
+              <p>
+                <span>Retrieved Matches</span>
+                <strong>{result.route.retrieval_matches?.length ?? 0}</strong>
+              </p>
+              <p>
+                <span>Citations</span>
+                <strong>{result.route.citations?.length ?? 0}</strong>
+              </p>
               {result.route.system_prompt ? (
                 <p>
                   <span>System Prompt</span>
                   <strong>{result.route.system_prompt}</strong>
                 </p>
+              ) : null}
+              {result.route.retrieval_matches && result.route.retrieval_matches.length > 0 ? (
+                result.route.retrieval_matches.map((match) => (
+                  <p key={match.id}>
+                    <span>{match.metadata.page_title ?? match.id}</span>
+                    <strong>{match.document}</strong>
+                  </p>
+                ))
+              ) : null}
+              {result.route.citations && result.route.citations.length > 0 ? (
+                result.route.citations.map((citation) => (
+                  <p key={citation.label}>
+                    <span>{`${citation.label} ${citation.page_title ?? citation.document_id}`}</span>
+                    <strong>{citation.page_url ?? citation.excerpt}</strong>
+                  </p>
+                ))
               ) : null}
             </ResultCard>
           ) : (

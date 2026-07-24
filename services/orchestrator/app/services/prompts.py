@@ -6,6 +6,15 @@ AgentKind = Literal["text_chat", "voice_processing"]
 
 
 @dataclass(frozen=True)
+class RetrievedSnippet:
+    id: str
+    document: str
+    source: str | None = None
+    page_url: str | None = None
+    page_title: str | None = None
+
+
+@dataclass(frozen=True)
 class PromptContext:
     agent: AgentKind
     website_id: str
@@ -20,6 +29,7 @@ class PromptContext:
     crawl_depth: int | None = None
     prompt_override: str | None = None
     language_hint: str | None = None
+    retrieval_matches: tuple[RetrievedSnippet, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -76,7 +86,8 @@ def _build_agent_prompt(context: PromptContext) -> str:
         prompt = (
             "You are IRA's live voice support assistant. "
             "Keep replies concise, speak naturally, and optimize for realtime interaction. "
-            "Acknowledge interruptions cleanly and stay useful during partial transcripts."
+            "Acknowledge interruptions cleanly and stay useful during partial transcripts. "
+            "When retrieved evidence supports your answer, reference the citation labels like [1] or [2] naturally."
         )
         if context.language_hint:
             prompt += f" Prefer responding in {context.language_hint} when appropriate."
@@ -85,7 +96,8 @@ def _build_agent_prompt(context: PromptContext) -> str:
     prompt = (
         "You are IRA's text support assistant. "
         "Provide precise, grounded website support answers with short, scannable wording. "
-        "Prefer direct answers first, then brief supporting detail when needed."
+        "Prefer direct answers first, then brief supporting detail when needed. "
+        "When retrieved evidence supports your answer, include citation labels like [1] or [2]."
     )
     if context.language_hint:
         prompt += f" Prefer responding in {context.language_hint} when appropriate."
@@ -93,12 +105,26 @@ def _build_agent_prompt(context: PromptContext) -> str:
 
 
 def _build_grounding_prompt(context: PromptContext) -> str:
-    return (
+    prompt = (
         "Stay grounded in the configured website knowledge base and known website metadata. "
         f"RAG collection: {context.rag_collection}. "
         f"RAG status: {context.rag_status or 'unknown'}. "
-        "If the knowledge base does not support a claim, say that clearly instead of inventing details."
+        "If the knowledge base does not support a claim, say that clearly instead of inventing details. "
+        "When citing retrieved evidence, use the numbered labels exactly as provided."
     )
+    if context.retrieval_matches:
+        prompt += " Retrieved evidence for this turn:"
+        for index, match in enumerate(context.retrieval_matches, start=1):
+            prompt += (
+                f" [{index}] id={match.id};"
+                f" source={match.source or 'unknown'};"
+                f" page_title={match.page_title or 'unknown'};"
+                f" page_url={match.page_url or 'unknown'};"
+                f" excerpt={_truncate(match.document)}"
+            )
+    else:
+        prompt += " No retrieved supporting excerpts were found for this turn."
+    return prompt
 
 
 def _build_website_prompt(context: PromptContext) -> str:
@@ -116,5 +142,16 @@ def _build_website_prompt(context: PromptContext) -> str:
         parts.append(f"Website-specific prompt override: {context.prompt_override}.")
     else:
         parts.append("No website-specific prompt override is configured.")
+    if context.retrieval_matches:
+        parts.append(f"Retrieved excerpts available for this turn: {len(context.retrieval_matches)}.")
+    else:
+        parts.append("No retrieved excerpts are available for this turn.")
 
     return " ".join(parts)
+
+
+def _truncate(value: str, limit: int = 280) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: limit - 3]}..."

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import hashlib
+import json
 import math
 
 import httpx
@@ -27,6 +28,7 @@ class RAGDocumentRecord:
 class ChromaRepository:
     _stub_collections: dict[str, dict[str, str]] = {}
     _stub_documents: dict[str, list[RAGDocumentRecord]] = {}
+    _stub_state_records: dict[str, RAGDocumentRecord] = {}
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -36,11 +38,26 @@ class ChromaRepository:
         protocol = "https" if self._settings.rag.use_ssl else "http"
         return f"{protocol}://{self._settings.rag.host}:{self._settings.rag.port}"
 
+    @property
+    def system_state_collection_name(self) -> str:
+        return f"{self._settings.rag.collection_prefix}__system_state"
+
     def collection_for_website(self, website_id: str) -> RAGCollectionBinding:
         collection_name = f"{self._settings.rag.collection_prefix}-{website_id}"
         try:
             collection = self._find_collection(collection_name)
             if collection is None:
+                if self._settings.rag.allow_stub_fallback:
+                    metadata = self._stub_collections.setdefault(collection_name, {})
+                    self._stub_documents.setdefault(collection_name, [])
+                    return RAGCollectionBinding(
+                        website_id=website_id,
+                        collection_name=collection_name,
+                        endpoint=self.endpoint,
+                        status="offline_stub",
+                        document_count=len(self._stub_documents[collection_name]),
+                        metadata=metadata,
+                    )
                 return RAGCollectionBinding(
                     website_id=website_id,
                     collection_name=collection_name,
@@ -70,6 +87,52 @@ class ChromaRepository:
                 document_count=0,
                 metadata=metadata,
             )
+
+    def list_website_collections(self) -> list[RAGCollectionBinding]:
+        prefix = f"{self._settings.rag.collection_prefix}-"
+        try:
+            response = self._request("GET", self._collections_path())
+            collections = response.json()
+            if not isinstance(collections, list):
+                raise ValueError("Unexpected collection list response from Chroma.")
+
+            bindings: list[RAGCollectionBinding] = []
+            for collection in collections:
+                if not isinstance(collection, dict):
+                    continue
+                collection_name = collection.get("name")
+                if not isinstance(collection_name, str) or not collection_name.startswith(prefix):
+                    continue
+
+                bindings.append(
+                    RAGCollectionBinding(
+                        website_id=collection_name[len(prefix) :],
+                        collection_name=collection_name,
+                        endpoint=self.endpoint,
+                        status="connected",
+                        document_count=0,
+                        metadata=self._stringify_metadata(collection.get("metadata")),
+                    )
+                )
+
+            return sorted(bindings, key=lambda item: item.collection_name)
+        except Exception:
+            if not self._settings.rag.allow_stub_fallback:
+                raise
+
+            bindings = [
+                RAGCollectionBinding(
+                    website_id=collection_name[len(prefix) :],
+                    collection_name=collection_name,
+                    endpoint=self.endpoint,
+                    status="offline_stub",
+                    document_count=len(self._stub_documents.get(collection_name, [])),
+                    metadata=metadata,
+                )
+                for collection_name, metadata in self._stub_collections.items()
+                if collection_name.startswith(prefix)
+            ]
+            return sorted(bindings, key=lambda item: item.collection_name)
 
     def ensure_collection(
         self,
@@ -104,6 +167,95 @@ class ChromaRepository:
                 document_count=0,
                 metadata=metadata,
             )
+
+    def save_state_record(
+        self,
+        record_id: str,
+        payload: dict[str, object],
+        metadata: dict[str, str],
+    ) -> None:
+        collection_name = self.system_state_collection_name
+        document = json.dumps(payload, sort_keys=True)
+        collection_binding = self._ensure_named_collection(
+            collection_name,
+            metadata={"kind": "system_state"},
+        )
+        if collection_binding.status == "offline_stub":
+            self._stub_state_records[record_id] = RAGDocumentRecord(
+                id=record_id,
+                document=document,
+                metadata=metadata,
+            )
+            return
+
+        collection = self._find_collection(collection_name)
+        if collection is None:
+            raise ValueError("System state collection missing during state record upsert.")
+
+        self._request(
+            "POST",
+            self._records_path(str(collection["id"]), "upsert"),
+            json={
+                "ids": [record_id],
+                "embeddings": [self._stub_embedding(document, self._settings.google_runtime.embedding_dimensions)],
+                "documents": [document],
+                "metadatas": [metadata],
+            },
+        )
+
+    def get_state_record(self, record_id: str) -> dict[str, object] | None:
+        collection_name = self.system_state_collection_name
+        collection_binding = self._ensure_named_collection(
+            collection_name,
+            metadata={"kind": "system_state"},
+        )
+        if collection_binding.status == "offline_stub":
+            record = self._stub_state_records.get(record_id)
+            if record is None:
+                return None
+            return self._parse_state_document(record.document)
+
+        collection = self._find_collection(collection_name)
+        if collection is None:
+            return None
+
+        records = self._get_records_by_ids(str(collection["id"]), [record_id])
+        if not records:
+            return None
+        return self._parse_state_document(records[0].document)
+
+    def list_state_records(
+        self,
+        record_type: str,
+        website_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, object]]:
+        collection_name = self.system_state_collection_name
+        collection_binding = self._ensure_named_collection(
+            collection_name,
+            metadata={"kind": "system_state"},
+        )
+        if collection_binding.status == "offline_stub":
+            records = [
+                record
+                for record in self._stub_state_records.values()
+                if record.metadata.get("record_type") == record_type
+                and (website_id is None or record.metadata.get("website_id") == website_id)
+            ]
+            return [self._parse_state_document(record.document) for record in records[:limit]]
+
+        collection = self._find_collection(collection_name)
+        if collection is None:
+            return []
+
+        records = self._get_all_records(str(collection["id"]), limit=1000)
+        filtered_records = [
+            record
+            for record in records
+            if record.metadata.get("record_type") == record_type
+            and (website_id is None or record.metadata.get("website_id") == website_id)
+        ]
+        return [self._parse_state_document(record.document) for record in filtered_records[:limit]]
 
     def upsert_documents(
         self,
@@ -305,6 +457,39 @@ class ChromaRepository:
                 return collection
         return None
 
+    def _ensure_named_collection(
+        self,
+        collection_name: str,
+        metadata: dict[str, str],
+    ) -> RAGCollectionBinding:
+        try:
+            collection = self._find_collection(collection_name)
+            if collection is None:
+                collection = self._create_collection(collection_name, metadata)
+
+            return RAGCollectionBinding(
+                website_id=collection_name,
+                collection_name=collection_name,
+                endpoint=self.endpoint,
+                status="connected",
+                document_count=0,
+                metadata=self._stringify_metadata(collection.get("metadata")),
+            )
+        except Exception:
+            if not self._settings.rag.allow_stub_fallback:
+                raise
+
+            self._stub_collections.setdefault(collection_name, metadata)
+            return RAGCollectionBinding(
+                website_id=collection_name,
+                collection_name=collection_name,
+                endpoint=self.endpoint,
+                status="offline_stub",
+                document_count=0,
+                metadata=metadata,
+            )
+ 
+
     def _create_collection(
         self,
         collection_name: str,
@@ -329,6 +514,37 @@ class ChromaRepository:
     def _records_path(self, collection_id: str, operation: str) -> str:
         return f"{self._collections_path()}/{collection_id}/{operation}"
 
+    def _get_records_by_ids(
+        self,
+        collection_id: str,
+        ids: list[str],
+    ) -> list[RAGDocumentRecord]:
+        response = self._request(
+            "POST",
+            self._records_path(collection_id, "get"),
+            json={
+                "ids": ids,
+                "include": ["documents", "metadatas"],
+            },
+        )
+        return self._records_from_get_payload(response.json())
+
+    def _get_all_records(
+        self,
+        collection_id: str,
+        limit: int,
+    ) -> list[RAGDocumentRecord]:
+        response = self._request(
+            "POST",
+            self._records_path(collection_id, "get"),
+            json={
+                "limit": limit,
+                "offset": 0,
+                "include": ["documents", "metadatas"],
+            },
+        )
+        return self._records_from_get_payload(response.json())
+
     def _request(self, method: str, path: str, **kwargs: object) -> httpx.Response:
         with httpx.Client(base_url=self.endpoint, timeout=5.0) as client:
             response = client.request(method, path, **kwargs)
@@ -340,6 +556,14 @@ class ChromaRepository:
         if not isinstance(metadata, dict):
             return {}
         return {str(key): str(value) for key, value in metadata.items()}
+
+    @staticmethod
+    def _parse_state_document(document: str) -> dict[str, object]:
+        try:
+            payload = json.loads(document)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     @classmethod
     def _records_from_get_payload(cls, payload: object) -> list[RAGDocumentRecord]:
@@ -396,38 +620,41 @@ class ChromaRepository:
         if not self._settings.google_runtime.api_key_configured:
             return self._stub_embedding(text, self._settings.google_runtime.embedding_dimensions)
 
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self._settings.google_runtime.embedding_model}:embedContent"
-        )
-        response = httpx.post(
-            url,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": self._settings.google_api_key,
-            },
-            json={
-                "model": f"models/{self._settings.google_runtime.embedding_model}",
-                "content": {"parts": [{"text": text}]},
-                "output_dimensionality": self._settings.google_runtime.embedding_dimensions,
-            },
-            timeout=15.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{self._settings.google_runtime.embedding_model}:embedContent"
+            )
+            response = httpx.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self._settings.google_api_key,
+                },
+                json={
+                    "model": f"models/{self._settings.google_runtime.embedding_model}",
+                    "content": {"parts": [{"text": text}]},
+                    "output_dimensionality": self._settings.google_runtime.embedding_dimensions,
+                },
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
 
-        embedding = payload.get("embedding") if isinstance(payload, dict) else None
-        if isinstance(embedding, dict) and isinstance(embedding.get("values"), list):
-            return [float(value) for value in embedding["values"]]
+            embedding = payload.get("embedding") if isinstance(payload, dict) else None
+            if isinstance(embedding, dict) and isinstance(embedding.get("values"), list):
+                return [float(value) for value in embedding["values"]]
 
-        embeddings = payload.get("embeddings") if isinstance(payload, dict) else None
-        if (
-            isinstance(embeddings, list)
-            and embeddings
-            and isinstance(embeddings[0], dict)
-            and isinstance(embeddings[0].get("values"), list)
-        ):
-            return [float(value) for value in embeddings[0]["values"]]
+            embeddings = payload.get("embeddings") if isinstance(payload, dict) else None
+            if (
+                isinstance(embeddings, list)
+                and embeddings
+                and isinstance(embeddings[0], dict)
+                and isinstance(embeddings[0].get("values"), list)
+            ):
+                return [float(value) for value in embeddings[0]["values"]]
+        except Exception:
+            return self._stub_embedding(text, self._settings.google_runtime.embedding_dimensions)
 
         raise ValueError("Unexpected embedding response from Google embedContent.")
 
