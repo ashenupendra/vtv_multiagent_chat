@@ -35,6 +35,8 @@ export function VoiceAssistantPage() {
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [listeningState, setListeningState] = useState<ListeningState>("idle");
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
+  const [awaitingResponse, setAwaitingResponse] = useState(false);
+  const [assistantTranscript, setAssistantTranscript] = useState("");
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [assistantLevel, setAssistantLevel] = useState(0);
@@ -53,12 +55,18 @@ export function VoiceAssistantPage() {
 
   const playbackContextRef = useRef<AudioContext | null>(null);
   const assistantSpeechTimeoutRef = useRef<number | null>(null);
+  const assistantFinalizeTimeoutRef = useRef<number | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const playbackGainRef = useRef<GainNode | null>(null);
 
   const micLevelTimeoutRef = useRef<number | null>(null);
   const assistantLevelTimeoutRef = useRef<number | null>(null);
   const assistantSpeakingRef = useRef(false);
+  const assistantTranscriptBufferRef = useRef("");
+  const silenceFrameCountRef = useRef(0);
+  const hadUserSpeechRef = useRef(false);
+  const audioEndedRef = useRef(false);
+  const userSpeechActiveRef = useRef(false);
   useEffect(() => {
     assistantSpeakingRef.current = assistantSpeaking;
   }, [assistantSpeaking]);
@@ -91,10 +99,32 @@ export function VoiceAssistantPage() {
       window.clearTimeout(assistantSpeechTimeoutRef.current);
       assistantSpeechTimeoutRef.current = null;
     }
+    if (assistantFinalizeTimeoutRef.current) {
+      window.clearTimeout(assistantFinalizeTimeoutRef.current);
+      assistantFinalizeTimeoutRef.current = null;
+    }
     if (assistantLevelTimeoutRef.current) {
       window.clearTimeout(assistantLevelTimeoutRef.current);
       assistantLevelTimeoutRef.current = null;
     }
+  }
+
+  function commitAssistantReply() {
+    const reply = assistantTranscriptBufferRef.current.trim();
+    if (looksLikeUsableReply(reply)) {
+      setAssistantTranscript(reply);
+    }
+  }
+
+  function scheduleAssistantReplyFinalize() {
+    if (assistantFinalizeTimeoutRef.current) {
+      window.clearTimeout(assistantFinalizeTimeoutRef.current);
+    }
+    assistantFinalizeTimeoutRef.current = window.setTimeout(() => {
+      setAwaitingResponse(false);
+      commitAssistantReply();
+      assistantFinalizeTimeoutRef.current = null;
+    }, 1600);
   }
 
   function stopCapture() {
@@ -129,6 +159,56 @@ export function VoiceAssistantPage() {
     resetPlayback();
     stopSession();
     setListeningState("idle");
+    setAwaitingResponse(false);
+    silenceFrameCountRef.current = 0;
+    hadUserSpeechRef.current = false;
+    audioEndedRef.current = false;
+    userSpeechActiveRef.current = false;
+  }
+
+  function mergeTranscriptChunk(current: string, incoming: string) {
+    const trimmedIncoming = incoming.trim();
+    if (!trimmedIncoming) return current;
+    if (!current) return trimmedIncoming;
+
+    if (trimmedIncoming === current) {
+      return current;
+    }
+    if (trimmedIncoming.includes(current)) {
+      return trimmedIncoming;
+    }
+    if (current.includes(trimmedIncoming)) {
+      return current;
+    }
+
+    const normalizedCurrent = current.replace(/\s+/g, " ").trim();
+    const normalizedIncoming = trimmedIncoming.replace(/\s+/g, " ").trim();
+    const maxOverlap = Math.min(normalizedCurrent.length, normalizedIncoming.length);
+
+    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+      if (
+        normalizedCurrent.slice(-overlap).toLowerCase() ===
+        normalizedIncoming.slice(0, overlap).toLowerCase()
+      ) {
+        return `${normalizedCurrent}${normalizedIncoming.slice(overlap)}`.trim();
+      }
+    }
+
+    return `${normalizedCurrent} ${normalizedIncoming}`.replace(/\s+/g, " ").trim();
+  }
+
+  function looksLikeFullSentence(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+    return (wordCount >= 4 && /[.!?]$/.test(trimmed)) || wordCount >= 6;
+  }
+
+  function looksLikeUsableReply(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+    return wordCount >= 2;
   }
 
   async function ensureMicrophone() {
@@ -237,7 +317,11 @@ export function VoiceAssistantPage() {
         }
         break;
       case "output_transcript":
-      case "model_text":
+        assistantTranscriptBufferRef.current = mergeTranscriptChunk(assistantTranscriptBufferRef.current, event.text);
+        if (looksLikeFullSentence(assistantTranscriptBufferRef.current)) {
+          setAssistantTranscript(assistantTranscriptBufferRef.current.trim());
+        }
+        scheduleAssistantReplyFinalize();
         if (bargeInActiveRef.current && sawInputAfterBargeInRef.current) {
           bargeInActiveRef.current = false;
           sawInputAfterBargeInRef.current = false;
@@ -245,12 +329,36 @@ export function VoiceAssistantPage() {
           resetPlayback();
         }
         break;
+      case "model_text":
+        assistantTranscriptBufferRef.current = mergeTranscriptChunk(assistantTranscriptBufferRef.current, event.text);
+        scheduleAssistantReplyFinalize();
+        if (bargeInActiveRef.current && sawInputAfterBargeInRef.current) {
+          bargeInActiveRef.current = false;
+          sawInputAfterBargeInRef.current = false;
+          suppressAssistantAudioRef.current = false;
+          resetPlayback();
+        }
+        break;
+      case "turn_complete":
+        if (assistantFinalizeTimeoutRef.current) {
+          window.clearTimeout(assistantFinalizeTimeoutRef.current);
+          assistantFinalizeTimeoutRef.current = null;
+        }
+        setAwaitingResponse(false);
+        commitAssistantReply();
+        break;
       case "audio_chunk":
         playAudioChunk(event.data);
+        scheduleAssistantReplyFinalize();
         break;
       case "error":
         setError(event.message);
         setConnectionState("error");
+        setAwaitingResponse(false);
+        if (assistantFinalizeTimeoutRef.current) {
+          window.clearTimeout(assistantFinalizeTimeoutRef.current);
+          assistantFinalizeTimeoutRef.current = null;
+        }
         break;
       default:
         break;
@@ -375,6 +483,12 @@ export function VoiceAssistantPage() {
 
   async function startTalking() {
     setError(null);
+    setAwaitingResponse(false);
+    assistantTranscriptBufferRef.current = "";
+    silenceFrameCountRef.current = 0;
+    hadUserSpeechRef.current = false;
+    audioEndedRef.current = false;
+    userSpeechActiveRef.current = false;
     const resolvedWebsiteId = fixedWebsiteId;
     const stream = await ensureMicrophone();
     await ensureSession(resolvedWebsiteId);
@@ -452,13 +566,45 @@ export function VoiceAssistantPage() {
         consecutiveBargeInFramesRef.current = 0;
       }
 
-      socket.send(
-        JSON.stringify({
-          type: "audio_chunk",
-          data: int16ToBase64(downsampled),
-          mimeType: "audio/pcm;rate=16000",
-        }),
-      );
+      const speechThreshold = 0.012;
+      const silenceThreshold = 0.006;
+      const requiredSilenceFrames = 14;
+      const speechActive = micRms > speechThreshold;
+
+      if (speechActive) {
+        if (!userSpeechActiveRef.current) {
+          assistantTranscriptBufferRef.current = "";
+        }
+        userSpeechActiveRef.current = true;
+        hadUserSpeechRef.current = true;
+        silenceFrameCountRef.current = 0;
+        audioEndedRef.current = false;
+        setAwaitingResponse(false);
+      } else if (userSpeechActiveRef.current && micRms < silenceThreshold) {
+        silenceFrameCountRef.current += 1;
+      }
+
+      if (userSpeechActiveRef.current) {
+        socket.send(
+          JSON.stringify({
+            type: "audio_chunk",
+            data: int16ToBase64(downsampled),
+            mimeType: "audio/pcm;rate=16000",
+          }),
+        );
+      }
+
+      if (
+        userSpeechActiveRef.current &&
+        hadUserSpeechRef.current &&
+        silenceFrameCountRef.current >= requiredSilenceFrames
+      ) {
+        userSpeechActiveRef.current = false;
+        silenceFrameCountRef.current = 0;
+        audioEndedRef.current = true;
+        setAwaitingResponse(true);
+        socket.send(JSON.stringify({ type: "audio_end" }));
+      }
     };
 
     source.connect(processor);
@@ -492,7 +638,7 @@ export function VoiceAssistantPage() {
   const pulseState =
     listeningState === "listening"
       ? "listening"
-      : assistantSpeaking
+      : assistantSpeaking || awaitingResponse
         ? "responding"
         : connectionState === "connected"
           ? "connected"
@@ -504,18 +650,19 @@ export function VoiceAssistantPage() {
   } as React.CSSProperties;
 
   const stateText =
-    listeningState === "listening"
-      ? "Listening..."
-      : assistantSpeaking
-        ? "Responding..."
-        : "Tap to talk";
-  const hintText = listeningState === "listening" || assistantSpeaking ? "Tap again to stop" : "";
-  const buttonPrimaryText = listeningState === "listening" || assistantSpeaking ? "Tap to stop" : "Tap to Talk";
-  const micConnected =
-    connectionState === "connecting" ||
-    connectionState === "connected" ||
-    listeningState === "listening" ||
-    assistantSpeaking;
+    assistantSpeaking || awaitingResponse
+      ? "Responding..."
+      : listeningState === "listening"
+        ? "Listening..."
+        : "";
+  const hintText = listeningState === "listening" || assistantSpeaking || awaitingResponse ? "Tap again to stop" : "";
+  const showAssistantReplyInButton = !assistantSpeaking && !awaitingResponse && assistantTranscript.trim().length > 0;
+  const isConversationActive = listeningState === "listening" || assistantSpeaking || awaitingResponse;
+  const buttonText = assistantTranscript.trim()
+    ? assistantTranscript
+    : isConversationActive
+      ? ""
+      : "I'm here to help with your\ntax questions.";
 
   return (
     <main className="va-root">
@@ -567,13 +714,13 @@ export function VoiceAssistantPage() {
           ) : null}
 
           <div className="va-footer">
-            <button type="button" className="va-talk-button" onClick={handleTap}>
-              <div
-                className={`va-mic ${micConnected ? "va-mic--connected" : "va-mic--disconnected"}`}
-                aria-hidden="true"
-              />
-              <div className="va-talk-copy">
-                <span>{buttonPrimaryText}</span>
+            <button
+              type="button"
+              className="va-talk-button va-talk-button--reply"
+              onClick={handleTap}
+            >
+              <div className="va-talk-reply">
+                <span>{buttonText}</span>
               </div>
             </button>
           </div>
