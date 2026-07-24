@@ -1,13 +1,9 @@
-FROM python:3.13-slim
+FROM mcr.microsoft.com/playwright/python:v1.54.0-jammy
 
 WORKDIR /app
 
 COPY services/orchestrator/requirements.txt /tmp/requirements.txt
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends wget gnupg \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r /tmp/requirements.txt \
-    && python -m playwright install --with-deps chromium
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY services/orchestrator /app/services/orchestrator
 

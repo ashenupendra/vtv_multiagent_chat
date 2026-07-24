@@ -5,6 +5,7 @@ import irasLogo from "./assets/iras-logo.svg";
 
 type ConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 type ListeningState = "idle" | "listening";
+type SensitivityLevel = "low" | "medium" | "high";
 
 type LiveServerEvent =
   | { type: "ready" }
@@ -20,6 +21,14 @@ type LiveServerEvent =
   | { type: "audio_chunk"; data: string; mimeType: string };
 
 const fixedWebsiteId = "iras-128e32";
+const sensitivityConfig: Record<SensitivityLevel, { threshold: number; frames: number }> = {
+  low: { threshold: 0.036, frames: 4 },
+  medium: { threshold: 0.028, frames: 3 },
+  high: { threshold: 0.02, frames: 2 },
+};
+const envSensitivityLevel = (import.meta.env.VITE_VOICE_SENSITIVITY_LEVEL as string | undefined)?.toLowerCase();
+const defaultSensitivityLevel: SensitivityLevel =
+  envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
 
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +38,7 @@ export function VoiceAssistantPage() {
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [assistantLevel, setAssistantLevel] = useState(0);
+  const sensitivityLevel = defaultSensitivityLevel;
 
   const apiBaseUrl = import.meta.env.VITE_IRA_API_BASE_URL as string | undefined;
   const client = useMemo(() => createIraApiClient({ baseUrl: apiBaseUrl }), [apiBaseUrl]);
@@ -56,6 +66,8 @@ export function VoiceAssistantPage() {
   const suppressAssistantAudioRef = useRef(false);
   const bargeInActiveRef = useRef(false);
   const sawInputAfterBargeInRef = useRef(false);
+  const consecutiveBargeInFramesRef = useRef(0);
+  const { threshold: bargeInThreshold, frames: requiredBargeInFrames } = sensitivityConfig[sensitivityLevel];
 
   useEffect(() => {
     return () => {
@@ -420,13 +432,24 @@ export function VoiceAssistantPage() {
           energy += input[i] * input[i];
         }
         const rms = Math.sqrt(energy / input.length);
-        if (rms > 0.015 && Date.now() - lastBargeInAtRef.value > 800) {
+        if (rms > bargeInThreshold) {
+          consecutiveBargeInFramesRef.current += 1;
+        } else {
+          consecutiveBargeInFramesRef.current = 0;
+        }
+        if (
+          consecutiveBargeInFramesRef.current >= requiredBargeInFrames &&
+          Date.now() - lastBargeInAtRef.value > 800
+        ) {
           lastBargeInAtRef.value = Date.now();
+          consecutiveBargeInFramesRef.current = 0;
           bargeInActiveRef.current = true;
           sawInputAfterBargeInRef.current = false;
           suppressAssistantAudioRef.current = true;
           resetPlayback();
         }
+      } else {
+        consecutiveBargeInFramesRef.current = 0;
       }
 
       socket.send(
