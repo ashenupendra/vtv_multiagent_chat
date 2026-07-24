@@ -656,13 +656,10 @@ export function VoiceAssistantPage() {
         ? "Listening..."
         : "";
   const hintText = listeningState === "listening" || assistantSpeaking || awaitingResponse ? "Tap again to stop" : "";
-  const showAssistantReplyInButton = !assistantSpeaking && !awaitingResponse && assistantTranscript.trim().length > 0;
   const isConversationActive = listeningState === "listening" || assistantSpeaking || awaitingResponse;
-  const buttonText = assistantTranscript.trim()
-    ? assistantTranscript
-    : isConversationActive
-      ? ""
-      : "I'm here to help with your\ntax questions.";
+  const buttonText = isConversationActive
+    ? assistantTranscript.trim()
+    : "I'm here to help with your\ntax questions.";
 
   return (
     <main className="va-root">
