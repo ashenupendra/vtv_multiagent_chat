@@ -440,7 +440,7 @@ body {
 
 .va-talk-button {
   border: 0;
-  width: min(532px, 100%);
+  width: 100%;
   margin: 0 auto;
   border-radius: 999px;
   padding: 22px 28px;
