@@ -87,20 +87,22 @@ def _build_agent_prompt(context: PromptContext) -> str:
             "You are IRA's live voice support assistant. "
             "Keep replies concise, speak naturally, and optimize for realtime interaction. "
             "Acknowledge interruptions cleanly and stay useful during partial transcripts. "
+            "Always respond in whatever language the user is currently speaking, and switch "
+            "immediately if the user switches languages mid-conversation; do not default to a "
+            "single fixed language. "
             "When retrieved evidence supports your answer, reference the citation labels like [1] or [2] naturally."
         )
-        if context.language_hint:
-            prompt += f" Prefer responding in {context.language_hint} when appropriate."
         return prompt
 
     prompt = (
         "You are IRA's text support assistant. "
         "Provide precise, grounded website support answers with short, scannable wording. "
         "Prefer direct answers first, then brief supporting detail when needed. "
+        "Always respond in whatever language the user is currently writing in, and switch "
+        "immediately if the user switches languages mid-conversation; do not default to a "
+        "single fixed language. "
         "When retrieved evidence supports your answer, include citation labels like [1] or [2]."
     )
-    if context.language_hint:
-        prompt += f" Prefer responding in {context.language_hint} when appropriate."
     return prompt
 
 

@@ -1,7 +1,16 @@
+html,
 body {
+  margin: 0;
+  width: 100%;
+  min-height: 100%;
   background:
     radial-gradient(circle at top, rgba(168, 85, 247, 0.28), transparent 32%),
     linear-gradient(180deg, #030712 0%, #111827 100%);
+}
+
+#root {
+  width: 100%;
+  min-height: 100dvh;
 }
 
 .voice-layout {
@@ -33,11 +42,14 @@ body {
 
 .va-root {
   min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 28px 16px;
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 0;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .va-root::before {
@@ -73,7 +85,8 @@ body {
 }
 
 .va-shell {
-  width: min(760px, 100%);
+  width: 100%;
+  min-height: 100dvh;
 }
 
 .va-header h1 {
@@ -86,35 +99,45 @@ body {
   border: 1px solid rgba(130, 147, 255, 0.28);
   background:
     linear-gradient(180deg, rgba(13, 16, 65, 0.94) 0%, rgba(7, 10, 48, 0.96) 100%);
-  border-radius: 34px;
+  border-radius: 0;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 24px 80px rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(28px);
   padding: 0;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+  min-height: 100dvh;
+  max-height: none;
 }
 
 .va-hero {
-  padding: 44px 36px 28px;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 32px 36px 20px;
 }
 
 .va-wave-panel {
   border-radius: 24px;
-  min-height: 660px;
+  min-height: 0;
   background:
     radial-gradient(circle at 50% 16%, rgba(114, 80, 255, 0.18), transparent 38%),
     linear-gradient(180deg, rgba(10, 14, 63, 0.7) 0%, rgba(8, 11, 52, 0.28) 100%);
   padding: 18px 12px 0;
-  display: grid;
-  align-content: start;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 18px;
 }
 
 .va-orb-stage {
   --va-audio-level: 0;
   position: relative;
-  height: 500px;
+  flex: 1 1 auto;
+  min-height: 320px;
+  height: clamp(320px, calc(100dvh - 470px), 500px);
   border-radius: 28px;
   overflow: hidden;
   background:
@@ -331,8 +354,9 @@ body {
 }
 
 .va-wave-caption {
+  flex: 0 0 auto;
   text-align: center;
-  padding-top: 14px;
+  padding-top: 6px;
   display: grid;
   gap: 2px;
 }
@@ -369,13 +393,54 @@ body {
 }
 
 .va-footer {
+  flex: 0 0 auto;
   border-top: 1px solid rgba(95, 111, 210, 0.28);
   padding: 32px 36px 46px;
 }
 
+.va-footer-pill {
+  width: min(640px, 100%);
+  margin: 0 auto;
+  border-radius: 999px;
+  padding: 18px 26px;
+  background:
+    linear-gradient(90deg, rgba(90, 184, 255, 0.98) 0%, rgba(132, 120, 255, 0.96) 48%, rgba(173, 83, 255, 0.96) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 18px 60px rgba(95, 102, 255, 0.34);
+  display: grid;
+  place-items: center;
+  gap: 4px;
+}
+
+.va-footer-pill-text {
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  text-align: center;
+  white-space: pre-line;
+}
+
+.va-footer-pill-hint {
+  color: rgba(241, 244, 255, 0.78);
+  font-size: 14px;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.va-footer-pill--listening,
+.va-footer-pill--responding {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 0 0 1px rgba(191, 219, 254, 0.22),
+    0 22px 74px rgba(95, 102, 255, 0.42),
+    0 0 92px rgba(127, 149, 255, 0.22);
+}
+
 .va-talk-button {
   border: 0;
-  width: min(532px, 100%);
+  width: 100%;
   margin: 0 auto;
   border-radius: 999px;
   padding: 22px 28px;
@@ -390,6 +455,51 @@ body {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.24),
     0 18px 60px rgba(95, 102, 255, 0.34);
+}
+
+.va-talk-button--reply {
+  min-height: 116px;
+  padding: 22px 34px;
+}
+
+.va-talk-button--static {
+  cursor: default;
+  pointer-events: none;
+}
+
+.va-footer-status {
+  width: min(532px, 100%);
+  margin: 0 auto;
+  border-radius: 999px;
+  padding: 18px 22px;
+  background: rgba(13, 16, 65, 0.28);
+  border: 1px solid rgba(120, 138, 255, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 16px 48px rgba(15, 24, 82, 0.3);
+  display: grid;
+  place-items: center;
+}
+
+.va-footer-status-inner {
+  display: grid;
+  gap: 2px;
+  text-align: center;
+}
+
+.va-footer-status-title {
+  margin: 0;
+  color: rgba(214, 228, 255, 0.92);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.va-footer-status-subtitle {
+  margin: 0;
+  color: rgba(138, 155, 220, 0.82);
+  font-size: 14px;
+  line-height: 1.2;
 }
 
 .va-talk-copy {
@@ -407,6 +517,26 @@ body {
 .va-talk-copy span {
   font-size: 15px;
   color: rgba(241, 244, 255, 0.74);
+}
+
+.va-talk-reply {
+  width: 100%;
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+
+.va-talk-reply span {
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .va-mic {
@@ -535,9 +665,99 @@ body {
   z-index: 1;
 }
 
+@media (max-width: 820px), (max-height: 860px) {
+  .va-root {
+    align-items: flex-start;
+    padding: 16px 12px;
+  }
+
+  .va-shell {
+    min-height: auto;
+  }
+
+  .va-card {
+    min-height: min(760px, calc(100dvh - 32px));
+    max-height: calc(100dvh - 32px);
+    border-radius: 28px;
+  }
+
+  .va-hero {
+    padding: 24px 20px 12px;
+  }
+
+  .va-wave-panel {
+    padding: 14px 10px 0;
+    gap: 14px;
+  }
+
+  .va-orb-stage {
+    min-height: 280px;
+    height: clamp(280px, calc(100dvh - 360px), 400px);
+  }
+
+  .va-orb-halo--outer {
+    width: 430px;
+    height: 430px;
+  }
+
+  .va-orb-halo--mid {
+    width: 344px;
+    height: 344px;
+  }
+
+  .va-orb-halo--inner {
+    width: 290px;
+    height: 290px;
+  }
+
+  .va-orb-core {
+    width: 252px;
+    height: 252px;
+  }
+
+  .va-orb-badge {
+    width: 110px;
+    height: 110px;
+  }
+
+  .va-orb-side--left {
+    left: 16px;
+  }
+
+  .va-orb-side--right {
+    right: 16px;
+  }
+
+  .va-state {
+    font-size: 24px;
+  }
+
+  .va-footer {
+    padding: 22px 20px 24px;
+  }
+
+  .va-footer-pill {
+    width: 100%;
+    padding: 16px 20px;
+  }
+
+  .va-footer-pill-text {
+    font-size: 16px;
+  }
+
+  .va-talk-button {
+    padding: 18px 20px;
+  }
+}
+
 @media (max-width: 720px) {
   .va-shell {
     width: 100%;
+  }
+
+  .va-card {
+    min-height: auto;
+    max-height: none;
   }
 
   .va-hero {
@@ -545,11 +765,12 @@ body {
   }
 
   .va-wave-panel {
-    min-height: 560px;
+    min-height: 0;
   }
 
   .va-orb-stage {
-    height: 420px;
+    min-height: 260px;
+    height: 320px;
   }
 
   .va-orb-halo--outer {
@@ -601,6 +822,15 @@ body {
 
   .va-footer {
     padding: 24px 18px 28px;
+  }
+
+  .va-footer-pill {
+    width: 100%;
+    padding: 15px 18px;
+  }
+
+  .va-footer-pill-text {
+    font-size: 16px;
   }
 
   .va-talk-button {

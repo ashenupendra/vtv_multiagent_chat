@@ -7,6 +7,12 @@ type ConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 type ListeningState = "idle" | "listening";
 type SensitivityLevel = "low" | "medium" | "high";
 
+type TranscriptEntry = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
 type LiveServerEvent =
   | { type: "ready" }
   | { type: "status"; state: string }
@@ -29,12 +35,15 @@ const sensitivityConfig: Record<SensitivityLevel, { threshold: number; frames: n
 const envSensitivityLevel = (import.meta.env.VITE_VOICE_SENSITIVITY_LEVEL as string | undefined)?.toLowerCase();
 const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
+const sessionGreetingText = "Hello! I’m the IRAS Tax Agent virtual assistant. How can I help you today?";
 
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [listeningState, setListeningState] = useState<ListeningState>("idle");
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
+  const [awaitingResponse, setAwaitingResponse] = useState(false);
+  const [transcriptLog, setTranscriptLog] = useState<TranscriptEntry[]>([]);
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [assistantLevel, setAssistantLevel] = useState(0);
@@ -53,19 +62,21 @@ export function VoiceAssistantPage() {
 
   const playbackContextRef = useRef<AudioContext | null>(null);
   const assistantSpeechTimeoutRef = useRef<number | null>(null);
+  const assistantFinalizeTimeoutRef = useRef<number | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const playbackGainRef = useRef<GainNode | null>(null);
 
   const micLevelTimeoutRef = useRef<number | null>(null);
   const assistantLevelTimeoutRef = useRef<number | null>(null);
   const assistantSpeakingRef = useRef(false);
+  const silenceFrameCountRef = useRef(0);
+  const hadUserSpeechRef = useRef(false);
+  const userSpeechActiveRef = useRef(false);
   useEffect(() => {
     assistantSpeakingRef.current = assistantSpeaking;
   }, [assistantSpeaking]);
 
   const suppressAssistantAudioRef = useRef(false);
-  const bargeInActiveRef = useRef(false);
-  const sawInputAfterBargeInRef = useRef(false);
   const consecutiveBargeInFramesRef = useRef(0);
   const { threshold: bargeInThreshold, frames: requiredBargeInFrames } = sensitivityConfig[sensitivityLevel];
 
@@ -91,10 +102,44 @@ export function VoiceAssistantPage() {
       window.clearTimeout(assistantSpeechTimeoutRef.current);
       assistantSpeechTimeoutRef.current = null;
     }
+    if (assistantFinalizeTimeoutRef.current) {
+      window.clearTimeout(assistantFinalizeTimeoutRef.current);
+      assistantFinalizeTimeoutRef.current = null;
+    }
     if (assistantLevelTimeoutRef.current) {
       window.clearTimeout(assistantLevelTimeoutRef.current);
       assistantLevelTimeoutRef.current = null;
     }
+  }
+
+  function appendTranscript(role: TranscriptEntry["role"], content: string) {
+    const normalizedContent = content.trim();
+    if (!normalizedContent) {
+      return;
+    }
+    setTranscriptLog((current) => {
+      const lastEntry = current[current.length - 1];
+      if (lastEntry && lastEntry.role === role) {
+        return [
+          ...current.slice(0, -1),
+          { ...lastEntry, content: joinTranscriptContent(lastEntry.content, normalizedContent) },
+        ];
+      }
+      return [
+        ...current,
+        { id: `${role}-${Date.now()}-${current.length}`, role, content: normalizedContent },
+      ];
+    });
+  }
+
+  function scheduleAssistantReplyFinalize() {
+    if (assistantFinalizeTimeoutRef.current) {
+      window.clearTimeout(assistantFinalizeTimeoutRef.current);
+    }
+    assistantFinalizeTimeoutRef.current = window.setTimeout(() => {
+      setAwaitingResponse(false);
+      assistantFinalizeTimeoutRef.current = null;
+    }, 1600);
   }
 
   function stopCapture() {
@@ -129,6 +174,10 @@ export function VoiceAssistantPage() {
     resetPlayback();
     stopSession();
     setListeningState("idle");
+    setAwaitingResponse(false);
+    silenceFrameCountRef.current = 0;
+    hadUserSpeechRef.current = false;
+    userSpeechActiveRef.current = false;
   }
 
   async function ensureMicrophone() {
@@ -226,31 +275,48 @@ export function VoiceAssistantPage() {
       case "ready":
         setConnectionState("connected");
         break;
-      case "input_transcript":
-        if (bargeInActiveRef.current) {
-          sawInputAfterBargeInRef.current = true;
-        }
-        break;
       case "interrupted":
-        if (bargeInActiveRef.current) {
-          suppressAssistantAudioRef.current = true;
-        }
+        suppressAssistantAudioRef.current = false;
+        resetPlayback();
+        break;
+      case "input_transcript":
+        appendTranscript("user", event.text);
         break;
       case "output_transcript":
-      case "model_text":
-        if (bargeInActiveRef.current && sawInputAfterBargeInRef.current) {
-          bargeInActiveRef.current = false;
-          sawInputAfterBargeInRef.current = false;
+        appendTranscript("assistant", event.text);
+        scheduleAssistantReplyFinalize();
+        if (suppressAssistantAudioRef.current) {
           suppressAssistantAudioRef.current = false;
           resetPlayback();
         }
         break;
+      case "model_text":
+        appendTranscript("assistant", event.text);
+        scheduleAssistantReplyFinalize();
+        if (suppressAssistantAudioRef.current) {
+          suppressAssistantAudioRef.current = false;
+          resetPlayback();
+        }
+        break;
+      case "turn_complete":
+        if (assistantFinalizeTimeoutRef.current) {
+          window.clearTimeout(assistantFinalizeTimeoutRef.current);
+          assistantFinalizeTimeoutRef.current = null;
+        }
+        setAwaitingResponse(false);
+        break;
       case "audio_chunk":
         playAudioChunk(event.data);
+        scheduleAssistantReplyFinalize();
         break;
       case "error":
         setError(event.message);
         setConnectionState("error");
+        setAwaitingResponse(false);
+        if (assistantFinalizeTimeoutRef.current) {
+          window.clearTimeout(assistantFinalizeTimeoutRef.current);
+          assistantFinalizeTimeoutRef.current = null;
+        }
         break;
       default:
         break;
@@ -375,6 +441,11 @@ export function VoiceAssistantPage() {
 
   async function startTalking() {
     setError(null);
+    setAwaitingResponse(false);
+    setTranscriptLog([]);
+    silenceFrameCountRef.current = 0;
+    hadUserSpeechRef.current = false;
+    userSpeechActiveRef.current = false;
     const resolvedWebsiteId = fixedWebsiteId;
     const stream = await ensureMicrophone();
     await ensureSession(resolvedWebsiteId);
@@ -386,6 +457,13 @@ export function VoiceAssistantPage() {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("Gemini Live session is not ready.");
     }
+
+    socket.send(
+      JSON.stringify({
+        type: "text",
+        text: `Greet the user by saying exactly "${sessionGreetingText}" and then wait for the user response.`,
+      }),
+    );
 
     const AudioContextCtor = window.AudioContext || (window as typeof window & {
       webkitAudioContext?: typeof AudioContext;
@@ -427,12 +505,7 @@ export function VoiceAssistantPage() {
       }
 
       if (assistantSpeakingRef.current) {
-        let energy = 0;
-        for (let i = 0; i < input.length; i += 1) {
-          energy += input[i] * input[i];
-        }
-        const rms = Math.sqrt(energy / input.length);
-        if (rms > bargeInThreshold) {
+        if (micRms > bargeInThreshold) {
           consecutiveBargeInFramesRef.current += 1;
         } else {
           consecutiveBargeInFramesRef.current = 0;
@@ -443,8 +516,6 @@ export function VoiceAssistantPage() {
         ) {
           lastBargeInAtRef.value = Date.now();
           consecutiveBargeInFramesRef.current = 0;
-          bargeInActiveRef.current = true;
-          sawInputAfterBargeInRef.current = false;
           suppressAssistantAudioRef.current = true;
           resetPlayback();
         }
@@ -452,6 +523,29 @@ export function VoiceAssistantPage() {
         consecutiveBargeInFramesRef.current = 0;
       }
 
+      const speechThreshold = 0.012;
+      const silenceThreshold = 0.006;
+      const requiredSilenceFrames = 14;
+      const speechActive = micRms > speechThreshold;
+
+      if (speechActive) {
+        userSpeechActiveRef.current = true;
+        hadUserSpeechRef.current = true;
+        silenceFrameCountRef.current = 0;
+        setAwaitingResponse(false);
+      } else if (userSpeechActiveRef.current && micRms < silenceThreshold) {
+        silenceFrameCountRef.current += 1;
+        if (hadUserSpeechRef.current && silenceFrameCountRef.current >= requiredSilenceFrames) {
+          userSpeechActiveRef.current = false;
+          silenceFrameCountRef.current = 0;
+          setAwaitingResponse(true);
+        }
+      }
+
+      // Stream continuously for the whole session, like the debug console does.
+      // Gemini Live's own server-side voice activity detection segments turns and
+      // drives interruption; sending audio_end mid-conversation would close its
+      // input stream early and silently drop audio sent right after a barge-in.
       socket.send(
         JSON.stringify({
           type: "audio_chunk",
@@ -492,7 +586,7 @@ export function VoiceAssistantPage() {
   const pulseState =
     listeningState === "listening"
       ? "listening"
-      : assistantSpeaking
+      : assistantSpeaking || awaitingResponse
         ? "responding"
         : connectionState === "connected"
           ? "connected"
@@ -504,18 +598,17 @@ export function VoiceAssistantPage() {
   } as React.CSSProperties;
 
   const stateText =
-    listeningState === "listening"
-      ? "Listening..."
-      : assistantSpeaking
-        ? "Responding..."
-        : "Tap to talk";
-  const hintText = listeningState === "listening" || assistantSpeaking ? "Tap again to stop" : "";
-  const buttonPrimaryText = listeningState === "listening" || assistantSpeaking ? "Tap to stop" : "Tap to Talk";
-  const micConnected =
-    connectionState === "connecting" ||
-    connectionState === "connected" ||
-    listeningState === "listening" ||
-    assistantSpeaking;
+    assistantSpeaking || awaitingResponse
+      ? "Responding..."
+      : listeningState === "listening"
+        ? "Listening..."
+        : "";
+  const hintText = listeningState === "listening" || assistantSpeaking || awaitingResponse ? "Tap again to stop" : "";
+  const isConversationActive = listeningState === "listening" || assistantSpeaking || awaitingResponse;
+  const latestTranscriptEntry = transcriptLog[transcriptLog.length - 1];
+  const buttonText = isConversationActive
+    ? (latestTranscriptEntry?.content.trim() ?? "")
+    : "I'm here to help with your\ntax questions.";
 
   return (
     <main className="va-root">
@@ -567,13 +660,13 @@ export function VoiceAssistantPage() {
           ) : null}
 
           <div className="va-footer">
-            <button type="button" className="va-talk-button" onClick={handleTap}>
-              <div
-                className={`va-mic ${micConnected ? "va-mic--connected" : "va-mic--disconnected"}`}
-                aria-hidden="true"
-              />
-              <div className="va-talk-copy">
-                <span>{buttonPrimaryText}</span>
+            <button
+              type="button"
+              className="va-talk-button va-talk-button--reply"
+              onClick={handleTap}
+            >
+              <div className="va-talk-reply">
+                <span>{buttonText}</span>
               </div>
             </button>
           </div>
@@ -581,4 +674,19 @@ export function VoiceAssistantPage() {
       </section>
     </main>
   );
+}
+
+function joinTranscriptContent(current: string, next: string) {
+  if (!current) {
+    return next;
+  }
+  if (!next) {
+    return current;
+  }
+
+  if (/^\s/.test(next) || /[ \n\t]$/.test(current) || /^[,.;:!?)]/.test(next)) {
+    return `${current}${next}`;
+  }
+
+  return `${current} ${next}`;
 }
