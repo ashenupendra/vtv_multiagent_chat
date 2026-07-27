@@ -7,6 +7,12 @@ type ConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 type ListeningState = "idle" | "listening";
 type SensitivityLevel = "low" | "medium" | "high";
 
+type TranscriptEntry = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+};
+
 type LiveServerEvent =
   | { type: "ready" }
   | { type: "status"; state: string }
@@ -37,7 +43,7 @@ export function VoiceAssistantPage() {
   const [listeningState, setListeningState] = useState<ListeningState>("idle");
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
   const [awaitingResponse, setAwaitingResponse] = useState(false);
-  const [assistantTranscript, setAssistantTranscript] = useState("");
+  const [transcriptLog, setTranscriptLog] = useState<TranscriptEntry[]>([]);
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [assistantLevel, setAssistantLevel] = useState(0);
@@ -63,7 +69,6 @@ export function VoiceAssistantPage() {
   const micLevelTimeoutRef = useRef<number | null>(null);
   const assistantLevelTimeoutRef = useRef<number | null>(null);
   const assistantSpeakingRef = useRef(false);
-  const assistantTranscriptBufferRef = useRef("");
   const silenceFrameCountRef = useRef(0);
   const hadUserSpeechRef = useRef(false);
   const userSpeechActiveRef = useRef(false);
@@ -107,11 +112,24 @@ export function VoiceAssistantPage() {
     }
   }
 
-  function commitAssistantReply() {
-    const reply = assistantTranscriptBufferRef.current.trim();
-    if (looksLikeUsableReply(reply)) {
-      setAssistantTranscript(reply);
+  function appendTranscript(role: TranscriptEntry["role"], content: string) {
+    const normalizedContent = content.trim();
+    if (!normalizedContent) {
+      return;
     }
+    setTranscriptLog((current) => {
+      const lastEntry = current[current.length - 1];
+      if (lastEntry && lastEntry.role === role) {
+        return [
+          ...current.slice(0, -1),
+          { ...lastEntry, content: joinTranscriptContent(lastEntry.content, normalizedContent) },
+        ];
+      }
+      return [
+        ...current,
+        { id: `${role}-${Date.now()}-${current.length}`, role, content: normalizedContent },
+      ];
+    });
   }
 
   function scheduleAssistantReplyFinalize() {
@@ -120,7 +138,6 @@ export function VoiceAssistantPage() {
     }
     assistantFinalizeTimeoutRef.current = window.setTimeout(() => {
       setAwaitingResponse(false);
-      commitAssistantReply();
       assistantFinalizeTimeoutRef.current = null;
     }, 1600);
   }
@@ -161,51 +178,6 @@ export function VoiceAssistantPage() {
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
     userSpeechActiveRef.current = false;
-  }
-
-  function mergeTranscriptChunk(current: string, incoming: string) {
-    const trimmedIncoming = incoming.trim();
-    if (!trimmedIncoming) return current;
-    if (!current) return trimmedIncoming;
-
-    if (trimmedIncoming === current) {
-      return current;
-    }
-    if (trimmedIncoming.includes(current)) {
-      return trimmedIncoming;
-    }
-    if (current.includes(trimmedIncoming)) {
-      return current;
-    }
-
-    const normalizedCurrent = current.replace(/\s+/g, " ").trim();
-    const normalizedIncoming = trimmedIncoming.replace(/\s+/g, " ").trim();
-    const maxOverlap = Math.min(normalizedCurrent.length, normalizedIncoming.length);
-
-    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-      if (
-        normalizedCurrent.slice(-overlap).toLowerCase() ===
-        normalizedIncoming.slice(0, overlap).toLowerCase()
-      ) {
-        return `${normalizedCurrent}${normalizedIncoming.slice(overlap)}`.trim();
-      }
-    }
-
-    return `${normalizedCurrent} ${normalizedIncoming}`.replace(/\s+/g, " ").trim();
-  }
-
-  function looksLikeFullSentence(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed) return false;
-    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-    return (wordCount >= 4 && /[.!?]$/.test(trimmed)) || wordCount >= 6;
-  }
-
-  function looksLikeUsableReply(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed) return false;
-    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-    return wordCount >= 2;
   }
 
   async function ensureMicrophone() {
@@ -307,11 +279,11 @@ export function VoiceAssistantPage() {
         suppressAssistantAudioRef.current = false;
         resetPlayback();
         break;
+      case "input_transcript":
+        appendTranscript("user", event.text);
+        break;
       case "output_transcript":
-        assistantTranscriptBufferRef.current = mergeTranscriptChunk(assistantTranscriptBufferRef.current, event.text);
-        if (looksLikeFullSentence(assistantTranscriptBufferRef.current)) {
-          setAssistantTranscript(assistantTranscriptBufferRef.current.trim());
-        }
+        appendTranscript("assistant", event.text);
         scheduleAssistantReplyFinalize();
         if (suppressAssistantAudioRef.current) {
           suppressAssistantAudioRef.current = false;
@@ -319,7 +291,7 @@ export function VoiceAssistantPage() {
         }
         break;
       case "model_text":
-        assistantTranscriptBufferRef.current = mergeTranscriptChunk(assistantTranscriptBufferRef.current, event.text);
+        appendTranscript("assistant", event.text);
         scheduleAssistantReplyFinalize();
         if (suppressAssistantAudioRef.current) {
           suppressAssistantAudioRef.current = false;
@@ -332,7 +304,6 @@ export function VoiceAssistantPage() {
           assistantFinalizeTimeoutRef.current = null;
         }
         setAwaitingResponse(false);
-        commitAssistantReply();
         break;
       case "audio_chunk":
         playAudioChunk(event.data);
@@ -471,8 +442,7 @@ export function VoiceAssistantPage() {
   async function startTalking() {
     setError(null);
     setAwaitingResponse(false);
-    setAssistantTranscript(sessionGreetingText);
-    assistantTranscriptBufferRef.current = "";
+    setTranscriptLog([{ id: `assistant-${Date.now()}`, role: "assistant", content: sessionGreetingText }]);
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
     userSpeechActiveRef.current = false;
@@ -559,10 +529,6 @@ export function VoiceAssistantPage() {
       const speechActive = micRms > speechThreshold;
 
       if (speechActive) {
-        if (!userSpeechActiveRef.current) {
-          setAssistantTranscript("");
-          assistantTranscriptBufferRef.current = "";
-        }
         userSpeechActiveRef.current = true;
         hadUserSpeechRef.current = true;
         silenceFrameCountRef.current = 0;
@@ -639,8 +605,9 @@ export function VoiceAssistantPage() {
         : "";
   const hintText = listeningState === "listening" || assistantSpeaking || awaitingResponse ? "Tap again to stop" : "";
   const isConversationActive = listeningState === "listening" || assistantSpeaking || awaitingResponse;
+  const latestTranscriptEntry = transcriptLog[transcriptLog.length - 1];
   const buttonText = isConversationActive
-    ? assistantTranscript.trim()
+    ? (latestTranscriptEntry?.content.trim() ?? "")
     : "I'm here to help with your\ntax questions.";
 
   return (
@@ -707,4 +674,19 @@ export function VoiceAssistantPage() {
       </section>
     </main>
   );
+}
+
+function joinTranscriptContent(current: string, next: string) {
+  if (!current) {
+    return next;
+  }
+  if (!next) {
+    return current;
+  }
+
+  if (/^\s/.test(next) || /[ \n\t]$/.test(current) || /^[,.;:!?)]/.test(next)) {
+    return `${current}${next}`;
+  }
+
+  return `${current} ${next}`;
 }
