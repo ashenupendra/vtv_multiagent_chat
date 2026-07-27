@@ -442,7 +442,7 @@ export function VoiceAssistantPage() {
   async function startTalking() {
     setError(null);
     setAwaitingResponse(false);
-    setTranscriptLog([{ id: `assistant-${Date.now()}`, role: "assistant", content: sessionGreetingText }]);
+    setTranscriptLog([]);
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
     userSpeechActiveRef.current = false;
@@ -461,7 +461,7 @@ export function VoiceAssistantPage() {
     socket.send(
       JSON.stringify({
         type: "text",
-        text: 'Greet the user by saying exactly "How can I help today?" and then wait for the user response.',
+        text: `Greet the user by saying exactly "${sessionGreetingText}" and then wait for the user response.`,
       }),
     );
 
