@@ -66,15 +66,12 @@ export function VoiceAssistantPage() {
   const assistantTranscriptBufferRef = useRef("");
   const silenceFrameCountRef = useRef(0);
   const hadUserSpeechRef = useRef(false);
-  const audioEndedRef = useRef(false);
   const userSpeechActiveRef = useRef(false);
   useEffect(() => {
     assistantSpeakingRef.current = assistantSpeaking;
   }, [assistantSpeaking]);
 
   const suppressAssistantAudioRef = useRef(false);
-  const bargeInActiveRef = useRef(false);
-  const sawInputAfterBargeInRef = useRef(false);
   const consecutiveBargeInFramesRef = useRef(0);
   const { threshold: bargeInThreshold, frames: requiredBargeInFrames } = sensitivityConfig[sensitivityLevel];
 
@@ -163,7 +160,6 @@ export function VoiceAssistantPage() {
     setAwaitingResponse(false);
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
-    audioEndedRef.current = false;
     userSpeechActiveRef.current = false;
   }
 
@@ -307,15 +303,9 @@ export function VoiceAssistantPage() {
       case "ready":
         setConnectionState("connected");
         break;
-      case "input_transcript":
-        if (bargeInActiveRef.current) {
-          sawInputAfterBargeInRef.current = true;
-        }
-        break;
       case "interrupted":
-        if (bargeInActiveRef.current) {
-          suppressAssistantAudioRef.current = true;
-        }
+        suppressAssistantAudioRef.current = false;
+        resetPlayback();
         break;
       case "output_transcript":
         assistantTranscriptBufferRef.current = mergeTranscriptChunk(assistantTranscriptBufferRef.current, event.text);
@@ -323,9 +313,7 @@ export function VoiceAssistantPage() {
           setAssistantTranscript(assistantTranscriptBufferRef.current.trim());
         }
         scheduleAssistantReplyFinalize();
-        if (bargeInActiveRef.current && sawInputAfterBargeInRef.current) {
-          bargeInActiveRef.current = false;
-          sawInputAfterBargeInRef.current = false;
+        if (suppressAssistantAudioRef.current) {
           suppressAssistantAudioRef.current = false;
           resetPlayback();
         }
@@ -333,9 +321,7 @@ export function VoiceAssistantPage() {
       case "model_text":
         assistantTranscriptBufferRef.current = mergeTranscriptChunk(assistantTranscriptBufferRef.current, event.text);
         scheduleAssistantReplyFinalize();
-        if (bargeInActiveRef.current && sawInputAfterBargeInRef.current) {
-          bargeInActiveRef.current = false;
-          sawInputAfterBargeInRef.current = false;
+        if (suppressAssistantAudioRef.current) {
           suppressAssistantAudioRef.current = false;
           resetPlayback();
         }
@@ -489,7 +475,6 @@ export function VoiceAssistantPage() {
     assistantTranscriptBufferRef.current = "";
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
-    audioEndedRef.current = false;
     userSpeechActiveRef.current = false;
     const resolvedWebsiteId = fixedWebsiteId;
     const stream = await ensureMicrophone();
@@ -550,12 +535,7 @@ export function VoiceAssistantPage() {
       }
 
       if (assistantSpeakingRef.current) {
-        let energy = 0;
-        for (let i = 0; i < input.length; i += 1) {
-          energy += input[i] * input[i];
-        }
-        const rms = Math.sqrt(energy / input.length);
-        if (rms > bargeInThreshold) {
+        if (micRms > bargeInThreshold) {
           consecutiveBargeInFramesRef.current += 1;
         } else {
           consecutiveBargeInFramesRef.current = 0;
@@ -566,8 +546,6 @@ export function VoiceAssistantPage() {
         ) {
           lastBargeInAtRef.value = Date.now();
           consecutiveBargeInFramesRef.current = 0;
-          bargeInActiveRef.current = true;
-          sawInputAfterBargeInRef.current = false;
           suppressAssistantAudioRef.current = true;
           resetPlayback();
         }
@@ -588,33 +566,27 @@ export function VoiceAssistantPage() {
         userSpeechActiveRef.current = true;
         hadUserSpeechRef.current = true;
         silenceFrameCountRef.current = 0;
-        audioEndedRef.current = false;
         setAwaitingResponse(false);
       } else if (userSpeechActiveRef.current && micRms < silenceThreshold) {
         silenceFrameCountRef.current += 1;
+        if (hadUserSpeechRef.current && silenceFrameCountRef.current >= requiredSilenceFrames) {
+          userSpeechActiveRef.current = false;
+          silenceFrameCountRef.current = 0;
+          setAwaitingResponse(true);
+        }
       }
 
-      if (userSpeechActiveRef.current) {
-        socket.send(
-          JSON.stringify({
-            type: "audio_chunk",
-            data: int16ToBase64(downsampled),
-            mimeType: "audio/pcm;rate=16000",
-          }),
-        );
-      }
-
-      if (
-        userSpeechActiveRef.current &&
-        hadUserSpeechRef.current &&
-        silenceFrameCountRef.current >= requiredSilenceFrames
-      ) {
-        userSpeechActiveRef.current = false;
-        silenceFrameCountRef.current = 0;
-        audioEndedRef.current = true;
-        setAwaitingResponse(true);
-        socket.send(JSON.stringify({ type: "audio_end" }));
-      }
+      // Stream continuously for the whole session, like the debug console does.
+      // Gemini Live's own server-side voice activity detection segments turns and
+      // drives interruption; sending audio_end mid-conversation would close its
+      // input stream early and silently drop audio sent right after a barge-in.
+      socket.send(
+        JSON.stringify({
+          type: "audio_chunk",
+          data: int16ToBase64(downsampled),
+          mimeType: "audio/pcm;rate=16000",
+        }),
+      );
     };
 
     source.connect(processor);
