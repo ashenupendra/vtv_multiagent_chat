@@ -93,6 +93,14 @@ class LiveProxyService:
                     json.dumps(self._setup_message(model, website_id, session_id, language_hint))
                 )
                 await client_socket.send_json({"type": "status", "state": "connecting"})
+                background_event = self._build_background_grounding_event(website_id)
+                stored_background_event: dict[str, Any] | None = None
+                if background_event["matches"]:
+                    stored_background_event = self._store_live_grounding_event(
+                        website_id=website_id,
+                        session_id=session_id,
+                        event=background_event,
+                    )
                 await client_socket.send_json(
                     {
                         "type": "grounding_history",
@@ -102,6 +110,8 @@ class LiveProxyService:
                         ),
                     }
                 )
+                if stored_background_event is not None:
+                    await client_socket.send_json(stored_background_event)
                 awaiting_audio_grounding = False
 
                 async def client_to_live() -> None:
@@ -301,6 +311,17 @@ class LiveProxyService:
                 }
             },
             self._build_grounding_event("text", text, matches),
+        )
+
+    def _build_background_grounding_event(self, website_id: str) -> dict[str, Any]:
+        matches = self._orchestrator_service.build_background_matches(
+            website_id,
+            limit=3,
+        )
+        return self._build_grounding_event(
+            "background",
+            "Initial session background grounding",
+            matches,
         )
 
     def _build_audio_grounding_turn(

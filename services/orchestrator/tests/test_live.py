@@ -103,3 +103,24 @@ def test_live_grounding_history_is_persisted_and_loaded() -> None:
     )
     assert api_response.status == "loaded"
     assert api_response.entries[-1].citations[0].label == "[1]"
+
+
+def test_build_background_grounding_event_uses_background_matches() -> None:
+    service = LiveProxyService(Settings())
+    service._orchestrator_service.build_background_matches = lambda website_id, limit=3: [  # type: ignore[method-assign]
+        RetrievedSnippet(
+            id="doc-bg-1",
+            document="GST return filing for the Jun period is due on 31 Jul 2026.",
+            source="crawl",
+            page_url="https://www.iras.gov.sg",
+            page_title="IRAS",
+        )
+    ]
+
+    event = service._build_background_grounding_event("example-site")  # type: ignore[attr-defined]
+
+    assert event["type"] == "grounding"
+    assert event["source"] == "background"
+    assert event["query"] == "Initial session background grounding"
+    assert len(event["matches"]) == 1
+    assert event["citations"][0]["label"] == "[1]"

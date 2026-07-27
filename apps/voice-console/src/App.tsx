@@ -19,7 +19,12 @@ import {
   TextArea,
 } from "@ira/ui";
 
-const voiceSessionId = "voice-console-session";
+function createVoiceSessionId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `voice-console-${crypto.randomUUID()}`;
+  }
+  return `voice-console-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
 type TranscriptEntry = {
   id: string;
@@ -106,6 +111,7 @@ export default function App() {
   const playbackContextRef = useRef<AudioContext | null>(null);
   const playbackSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const nextStartTimeRef = useRef<number>(0);
+  const voiceSessionIdRef = useRef(createVoiceSessionId());
 
   const apiBaseUrl = import.meta.env.VITE_IRA_API_BASE_URL as string | undefined;
   const client = useMemo(() => createIraApiClient({ baseUrl: apiBaseUrl }), [apiBaseUrl]);
@@ -167,6 +173,7 @@ export default function App() {
     liveSocketRef.current?.close();
     liveSocketRef.current = null;
     liveSessionVersionRef.current += 1;
+    voiceSessionIdRef.current = createVoiceSessionId();
     stopPlayback();
     setResult(null);
     setLiveConfig(null);
@@ -193,6 +200,7 @@ export default function App() {
     liveSocketRef.current?.close();
     liveSocketRef.current = null;
     liveSessionVersionRef.current += 1;
+    voiceSessionIdRef.current = createVoiceSessionId();
     stopPlayback();
     setResult(null);
     setLiveConfig(null);
@@ -458,10 +466,11 @@ export default function App() {
     }
 
     resetLiveConversation();
+    const sessionId = voiceSessionIdRef.current;
     const response = await client.routeConversation({
       mode: "voice",
       website_id: websiteId,
-      session_id: voiceSessionId,
+      session_id: sessionId,
       message: "Start a multilingual voice support session.",
       history: [],
       language_hint: "en-US",
@@ -469,7 +478,7 @@ export default function App() {
     setResult(response);
     const historyResponse = await client.getGroundingHistory(
       response.route.website_id,
-      voiceSessionId,
+      sessionId,
     );
     setLiveGroundingHistory(historyResponse.entries);
     if (historyResponse.entries.length > 0) {
@@ -490,7 +499,7 @@ export default function App() {
       buildLiveWebSocketUrl(
         response.route.website_id,
         response.route.default_model,
-        voiceSessionId,
+        sessionId,
         "en-US",
       ),
     );
