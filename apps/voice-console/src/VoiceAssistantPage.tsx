@@ -35,7 +35,7 @@ const sensitivityConfig: Record<SensitivityLevel, { threshold: number; frames: n
 const envSensitivityLevel = (import.meta.env.VITE_VOICE_SENSITIVITY_LEVEL as string | undefined)?.toLowerCase();
 const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
-const sessionGreetingText = "How can I help today?";
+const sessionGreetingText = "Hello! I’m the IRAS Tax Agent virtual assistant. How can I help you today?";
 
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
