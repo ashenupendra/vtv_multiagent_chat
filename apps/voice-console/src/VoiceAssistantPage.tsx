@@ -37,8 +37,10 @@ const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
 const sessionGreetingText = "Hello! I’m the IRAS Tax Agent virtual assistant. How can I help you today?";
 const inactivityFollowUpText =    "If you don't have any more questions, I'll end our conversation here in a few seconds. If there's anything else you'd like to ask, just start speaking and I'll be happy to help.";
+// Silence after the assistant finishes speaking, before the one-time follow-up prompt.
 const INACTIVITY_TIMEOUT_MS = 10_000;
-type InactivityStage = "idle" | "prompted";
+// Visible countdown after the follow-up prompt finishes speaking, before the session ends.
+const FOLLOW_UP_COUNTDOWN_SECONDS = 5;
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
@@ -50,6 +52,7 @@ export function VoiceAssistantPage() {
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [assistantLevel, setAssistantLevel] = useState(0);
+  const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
   const sensitivityLevel = defaultSensitivityLevel;
 
   const apiBaseUrl = import.meta.env.VITE_IRA_API_BASE_URL as string | undefined;
@@ -78,8 +81,14 @@ export function VoiceAssistantPage() {
   const userSpeechActiveRef = useRef(false);
   const consecutiveSpeechFramesRef = useRef(0);
   const followUpPromptActiveRef = useRef(false);
-  const inactivityStageRef = useRef<InactivityStage>("idle");
+  // One-shot gate: the follow-up prompt may be spoken at most once per session.
+  const followUpUsedRef = useRef(false);
+  // True from the moment the follow-up prompt is triggered until its audio
+  // finishes playing, marking that the next "assistant done speaking" event
+  // should start the closing countdown rather than just settle silently.
+  const followUpAwaitingCountdownRef = useRef(false);
   const inactivityTimerRef = useRef<number | null>(null);
+  const countdownIntervalRef = useRef<number | null>(null);
   useEffect(() => {
     assistantSpeakingRef.current = assistantSpeaking;
   }, [assistantSpeaking]);
@@ -109,6 +118,9 @@ export function VoiceAssistantPage() {
     assistantSpeakingRef.current = false;
     setAssistantSpeaking(false);
     setAssistantLevel(0);
+    // Playback was cut short (barge-in/interrupt); the follow-up prompt, if
+    // any was in flight, never finished, so don't start a countdown for it.
+    followUpAwaitingCountdownRef.current = false;
     if (assistantSpeechTimeoutRef.current) {
       window.clearTimeout(assistantSpeechTimeoutRef.current);
       assistantSpeechTimeoutRef.current = null;
@@ -182,7 +194,9 @@ export function VoiceAssistantPage() {
 
   function stopAll(options: { releaseMicrophone?: boolean } = {}) {
     clearInactivityTimer();
-    inactivityStageRef.current = "idle";
+    clearFollowUpCountdown();
+    followUpUsedRef.current = false;
+    followUpAwaitingCountdownRef.current = false;
     stopCapture();
     resetPlayback();
     stopSession();
@@ -230,38 +244,54 @@ export function VoiceAssistantPage() {
     }
   }
 
+  function clearFollowUpCountdown() {
+    if (countdownIntervalRef.current) {
+      window.clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setCountdownSeconds(null);
+  }
+
+  // Arms the single 10s pre-prompt timer. Guarded by followUpUsedRef so the
+  // follow-up prompt can only ever be scheduled once per session, and by
+  // inactivityTimerRef so at most one such timer exists at a time.
   function armInactivityTimerIfIdle() {
+    if (followUpUsedRef.current) {
+      return;
+    }
     if (inactivityTimerRef.current || !isIdleListeningNow()) {
       return;
     }
-    const stage = inactivityStageRef.current;
-    logVoiceState("inactivity: timer armed", { stage, timeoutMs: INACTIVITY_TIMEOUT_MS });
+    logVoiceState("inactivity: 10s pre-prompt timer armed", { timeoutMs: INACTIVITY_TIMEOUT_MS });
     inactivityTimerRef.current = window.setTimeout(() => {
       inactivityTimerRef.current = null;
-      if (inactivityStageRef.current === "idle") {
-        triggerInactivityPrompt();
-      } else {
-        endConversationDueToInactivity();
-      }
+      triggerInactivityPrompt();
     }, INACTIVITY_TIMEOUT_MS);
   }
 
+  // Any user interaction cancels whichever timer is currently pending: the
+  // pre-prompt wait, or the post-prompt closing countdown.
   function registerUserInteraction(reason: string) {
-    if (inactivityTimerRef.current || inactivityStageRef.current !== "idle") {
+    if (inactivityTimerRef.current || countdownIntervalRef.current) {
       logVoiceState("inactivity: user interaction detected, cancelling countdown", { reason });
     }
-    inactivityStageRef.current = "idle";
     clearInactivityTimer();
+    clearFollowUpCountdown();
+    followUpAwaitingCountdownRef.current = false;
   }
 
   function triggerInactivityPrompt() {
+    if (followUpUsedRef.current) {
+      return;
+    }
     const socket = liveSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       logVoiceState("inactivity: prompt skipped, socket not open");
       return;
     }
-    logVoiceState("inactivity: 10s idle elapsed, triggering follow-up prompt");
-    inactivityStageRef.current = "prompted";
+    logVoiceState("inactivity: 10s idle elapsed, asking the one-time follow-up prompt");
+    followUpUsedRef.current = true;
+    followUpAwaitingCountdownRef.current = true;
     followUpPromptActiveRef.current = true;
     assistantSpeakingRef.current = true;
     setAssistantSpeaking(true);
@@ -273,8 +303,28 @@ export function VoiceAssistantPage() {
     );
   }
 
+  // Starts the single visible 5s countdown once the follow-up prompt has
+  // actually finished playing. Ending at zero closes the session.
+  function startFollowUpCountdown() {
+    clearFollowUpCountdown();
+    logVoiceState("inactivity: follow-up finished, starting closing countdown", {
+      seconds: FOLLOW_UP_COUNTDOWN_SECONDS,
+    });
+    let remaining = FOLLOW_UP_COUNTDOWN_SECONDS;
+    setCountdownSeconds(remaining);
+    countdownIntervalRef.current = window.setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearFollowUpCountdown();
+        endConversationDueToInactivity();
+        return;
+      }
+      setCountdownSeconds(remaining);
+    }, 1000);
+  }
+
   function endConversationDueToInactivity() {
-    logVoiceState("inactivity: no response after follow-up prompt, ending conversation");
+    logVoiceState("inactivity: countdown elapsed with no response, ending session");
     stopAll({ releaseMicrophone: true });
   }
 
@@ -368,6 +418,10 @@ export function VoiceAssistantPage() {
       setAssistantSpeaking(false);
       assistantSpeechTimeoutRef.current = null;
       logVoiceState("assistant audio playback settled");
+      if (followUpAwaitingCountdownRef.current) {
+        followUpAwaitingCountdownRef.current = false;
+        startFollowUpCountdown();
+      }
     }, 800);
   }
 
@@ -422,6 +476,13 @@ export function VoiceAssistantPage() {
         }
         setAwaitingResponse(false);
         resetTurnDetection();
+        // Safety net: if the follow-up turn completed without ever producing
+        // audio, the playback-settle callback will never fire to start the
+        // countdown. Start it here instead so the session still closes.
+        if (followUpAwaitingCountdownRef.current && !assistantSpeechTimeoutRef.current) {
+          followUpAwaitingCountdownRef.current = false;
+          startFollowUpCountdown();
+        }
         break;
       case "audio_chunk":
         playAudioChunk(event.data);
@@ -792,6 +853,11 @@ export function VoiceAssistantPage() {
               <div className="va-wave-caption">
                 <p className="va-state">{stateText}</p>
                 {hintText ? <p className="va-hint">{hintText}</p> : null}
+                {countdownSeconds !== null ? (
+                  <p className="va-countdown" role="status" aria-live="assertive">
+                    {`Session closing in ${countdownSeconds}...`}
+                  </p>
+                ) : null}
               </div>
             </div>
           </div>
