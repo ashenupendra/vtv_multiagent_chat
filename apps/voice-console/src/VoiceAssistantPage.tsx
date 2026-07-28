@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createIraApiClient, type LiveConfigResponse } from "@ira/agents-sdk";
 import irasLogo from "./assets/iras-logo.svg";
@@ -36,12 +36,16 @@ const envSensitivityLevel = (import.meta.env.VITE_VOICE_SENSITIVITY_LEVEL as str
 const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
 const sessionGreetingText = "Hello! I’m the IRAS Tax Agent virtual assistant. How can I help you today?";
+const inactivityFollowUpText =    "If you don't have any more questions, I'll end our conversation here in a few seconds. If there's anything else you'd like to ask, just start speaking and I'll be happy to help.";
+const INACTIVITY_TIMEOUT_MS = 10_000;
+type InactivityStage = "idle" | "prompted";
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [listeningState, setListeningState] = useState<ListeningState>("idle");
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
   const [awaitingResponse, setAwaitingResponse] = useState(false);
+  const awaitingResponseRef = useRef(false);
   const [transcriptLog, setTranscriptLog] = useState<TranscriptEntry[]>([]);
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [micLevel, setMicLevel] = useState(0);
@@ -73,9 +77,15 @@ export function VoiceAssistantPage() {
   const hadUserSpeechRef = useRef(false);
   const userSpeechActiveRef = useRef(false);
   const consecutiveSpeechFramesRef = useRef(0);
+  const followUpPromptActiveRef = useRef(false);
+  const inactivityStageRef = useRef<InactivityStage>("idle");
+  const inactivityTimerRef = useRef<number | null>(null);
   useEffect(() => {
     assistantSpeakingRef.current = assistantSpeaking;
   }, [assistantSpeaking]);
+  useEffect(() => {
+    awaitingResponseRef.current = awaitingResponse;
+  }, [awaitingResponse]);
 
   const suppressAssistantAudioRef = useRef(false);
   const consecutiveBargeInFramesRef = useRef(0);
@@ -170,13 +180,23 @@ export function VoiceAssistantPage() {
     setConnectionState("closed");
   }
 
-  function stopAll() {
+  function stopAll(options: { releaseMicrophone?: boolean } = {}) {
+    clearInactivityTimer();
+    inactivityStageRef.current = "idle";
     stopCapture();
     resetPlayback();
     stopSession();
     setListeningState("idle");
     setAwaitingResponse(false);
     resetTurnDetection();
+    greetingTurnActiveRef.current = false;
+    followUpPromptActiveRef.current = false;
+    suppressAssistantAudioRef.current = false;
+    consecutiveBargeInFramesRef.current = 0;
+    if (options.releaseMicrophone) {
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
   }
 
   function resetTurnDetection() {
@@ -191,6 +211,71 @@ export function VoiceAssistantPage() {
       // eslint-disable-next-line no-console
       console.debug(`[voice-state] ${label}`, detail ?? {});
     }
+  }
+
+  function isIdleListeningNow() {
+    return (
+      liveSocketRef.current?.readyState === WebSocket.OPEN &&
+      !assistantSpeakingRef.current &&
+      !awaitingResponseRef.current &&
+      !greetingTurnActiveRef.current &&
+      !followUpPromptActiveRef.current
+    );
+  }
+
+  function clearInactivityTimer() {
+    if (inactivityTimerRef.current) {
+      window.clearTimeout(inactivityTimerRef.current);
+      inactivityTimerRef.current = null;
+    }
+  }
+
+  function armInactivityTimerIfIdle() {
+    if (inactivityTimerRef.current || !isIdleListeningNow()) {
+      return;
+    }
+    const stage = inactivityStageRef.current;
+    logVoiceState("inactivity: timer armed", { stage, timeoutMs: INACTIVITY_TIMEOUT_MS });
+    inactivityTimerRef.current = window.setTimeout(() => {
+      inactivityTimerRef.current = null;
+      if (inactivityStageRef.current === "idle") {
+        triggerInactivityPrompt();
+      } else {
+        endConversationDueToInactivity();
+      }
+    }, INACTIVITY_TIMEOUT_MS);
+  }
+
+  function registerUserInteraction(reason: string) {
+    if (inactivityTimerRef.current || inactivityStageRef.current !== "idle") {
+      logVoiceState("inactivity: user interaction detected, cancelling countdown", { reason });
+    }
+    inactivityStageRef.current = "idle";
+    clearInactivityTimer();
+  }
+
+  function triggerInactivityPrompt() {
+    const socket = liveSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      logVoiceState("inactivity: prompt skipped, socket not open");
+      return;
+    }
+    logVoiceState("inactivity: 10s idle elapsed, triggering follow-up prompt");
+    inactivityStageRef.current = "prompted";
+    followUpPromptActiveRef.current = true;
+    assistantSpeakingRef.current = true;
+    setAssistantSpeaking(true);
+    socket.send(
+      JSON.stringify({
+        type: "text",
+        text: `Say "${inactivityFollowUpText}" and then wait for the user response.`,
+      }),
+    );
+  }
+
+  function endConversationDueToInactivity() {
+    logVoiceState("inactivity: no response after follow-up prompt, ending conversation");
+    stopAll({ releaseMicrophone: true });
   }
 
   async function ensureMicrophone() {
@@ -272,6 +357,7 @@ export function VoiceAssistantPage() {
       assistantLevelTimeoutRef.current = null;
     }, 120);
     greetingTurnActiveRef.current = false;
+    followUpPromptActiveRef.current = false;
     assistantSpeakingRef.current = true;
     setAssistantSpeaking(true);
     if (assistantSpeechTimeoutRef.current) {
@@ -295,6 +381,8 @@ export function VoiceAssistantPage() {
         suppressAssistantAudioRef.current = false;
         resetPlayback();
         greetingTurnActiveRef.current = false;
+        followUpPromptActiveRef.current = false;
+        registerUserInteraction("interrupted");
         setListeningState("listening");
         setAwaitingResponse(false);
         break;
@@ -306,6 +394,7 @@ export function VoiceAssistantPage() {
           }
           hadUserSpeechRef.current = true;
           silenceFrameCountRef.current = 0;
+          registerUserInteraction("input_transcript");
         }
         break;
       case "output_transcript":
@@ -326,6 +415,7 @@ export function VoiceAssistantPage() {
         break;
       case "turn_complete":
         greetingTurnActiveRef.current = false;
+        followUpPromptActiveRef.current = false;
         if (assistantFinalizeTimeoutRef.current) {
           window.clearTimeout(assistantFinalizeTimeoutRef.current);
           assistantFinalizeTimeoutRef.current = null;
@@ -540,7 +630,7 @@ export function VoiceAssistantPage() {
         lastChunkLogAt = Date.now();
       }
 
-      if (assistantSpeakingRef.current || greetingTurnActiveRef.current) {
+      if (assistantSpeakingRef.current || greetingTurnActiveRef.current || followUpPromptActiveRef.current) {
         if (micRms > bargeInThreshold) {
           consecutiveBargeInFramesRef.current += 1;
         } else {
@@ -554,8 +644,11 @@ export function VoiceAssistantPage() {
           consecutiveBargeInFramesRef.current = 0;
           suppressAssistantAudioRef.current = true;
           resetPlayback();
+          const wasFollowUpPrompt = followUpPromptActiveRef.current;
           greetingTurnActiveRef.current = false;
-          logVoiceState("barge-in detected, cutting assistant audio");
+          followUpPromptActiveRef.current = false;
+          logVoiceState("barge-in detected, cutting assistant audio", { wasFollowUpPrompt });
+          registerUserInteraction("barge-in");
           setListeningState("listening");
           setAwaitingResponse(false);
         }
@@ -580,6 +673,7 @@ export function VoiceAssistantPage() {
         userSpeechActiveRef.current = true;
         silenceFrameCountRef.current = 0;
         setAwaitingResponse(false);
+        registerUserInteraction("mic-energy");
       } else if (userSpeechActiveRef.current && micRms < silenceThreshold) {
         silenceFrameCountRef.current += 1;
         if (hadUserSpeechRef.current && silenceFrameCountRef.current >= requiredSilenceFrames) {
@@ -588,6 +682,8 @@ export function VoiceAssistantPage() {
           logVoiceState("silence after real speech, awaiting response");
           setAwaitingResponse(true);
         }
+      } else {
+        armInactivityTimerIfIdle();
       }
 
       // Stream continuously for the whole session, like the debug console does.
