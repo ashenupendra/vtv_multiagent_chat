@@ -377,6 +377,14 @@ body {
   line-height: 1.18;
 }
 
+.va-countdown {
+  margin: 4px 0 0;
+  color: rgba(251, 191, 36, 0.95);
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.18;
+}
+
 .va-error {
   margin: 0;
   padding: 12px 14px;

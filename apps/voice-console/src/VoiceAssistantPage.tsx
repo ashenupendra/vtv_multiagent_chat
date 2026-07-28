@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createIraApiClient, type LiveConfigResponse } from "@ira/agents-sdk";
 import irasLogo from "./assets/iras-logo.svg";
@@ -36,17 +36,23 @@ const envSensitivityLevel = (import.meta.env.VITE_VOICE_SENSITIVITY_LEVEL as str
 const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
 const sessionGreetingText = "Hello! I’m the IRAS Tax Agent virtual assistant. How can I help you today?";
-
+const inactivityFollowUpText =    "If you don't have any more questions, I'll end our conversation here in a few seconds. If there's anything else you'd like to ask, just start speaking and I'll be happy to help.";
+// Silence after the assistant finishes speaking, before the one-time follow-up prompt.
+const INACTIVITY_TIMEOUT_MS = 10_000;
+// Visible countdown after the follow-up prompt finishes speaking, before the session ends.
+const FOLLOW_UP_COUNTDOWN_SECONDS = 5;
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [listeningState, setListeningState] = useState<ListeningState>("idle");
   const [assistantSpeaking, setAssistantSpeaking] = useState(false);
   const [awaitingResponse, setAwaitingResponse] = useState(false);
+  const awaitingResponseRef = useRef(false);
   const [transcriptLog, setTranscriptLog] = useState<TranscriptEntry[]>([]);
   const [liveConfig, setLiveConfig] = useState<LiveConfigResponse | null>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [assistantLevel, setAssistantLevel] = useState(0);
+  const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null);
   const sensitivityLevel = defaultSensitivityLevel;
 
   const apiBaseUrl = import.meta.env.VITE_IRA_API_BASE_URL as string | undefined;
@@ -69,12 +75,26 @@ export function VoiceAssistantPage() {
   const micLevelTimeoutRef = useRef<number | null>(null);
   const assistantLevelTimeoutRef = useRef<number | null>(null);
   const assistantSpeakingRef = useRef(false);
+  const greetingTurnActiveRef = useRef(false);
   const silenceFrameCountRef = useRef(0);
   const hadUserSpeechRef = useRef(false);
   const userSpeechActiveRef = useRef(false);
+  const consecutiveSpeechFramesRef = useRef(0);
+  const followUpPromptActiveRef = useRef(false);
+  // One-shot gate: the follow-up prompt may be spoken at most once per session.
+  const followUpUsedRef = useRef(false);
+  // True from the moment the follow-up prompt is triggered until its audio
+  // finishes playing, marking that the next "assistant done speaking" event
+  // should start the closing countdown rather than just settle silently.
+  const followUpAwaitingCountdownRef = useRef(false);
+  const inactivityTimerRef = useRef<number | null>(null);
+  const countdownIntervalRef = useRef<number | null>(null);
   useEffect(() => {
     assistantSpeakingRef.current = assistantSpeaking;
   }, [assistantSpeaking]);
+  useEffect(() => {
+    awaitingResponseRef.current = awaitingResponse;
+  }, [awaitingResponse]);
 
   const suppressAssistantAudioRef = useRef(false);
   const consecutiveBargeInFramesRef = useRef(0);
@@ -98,6 +118,9 @@ export function VoiceAssistantPage() {
     assistantSpeakingRef.current = false;
     setAssistantSpeaking(false);
     setAssistantLevel(0);
+    // Playback was cut short (barge-in/interrupt); the follow-up prompt, if
+    // any was in flight, never finished, so don't start a countdown for it.
+    followUpAwaitingCountdownRef.current = false;
     if (assistantSpeechTimeoutRef.current) {
       window.clearTimeout(assistantSpeechTimeoutRef.current);
       assistantSpeechTimeoutRef.current = null;
@@ -169,15 +192,140 @@ export function VoiceAssistantPage() {
     setConnectionState("closed");
   }
 
-  function stopAll() {
+  function stopAll(options: { releaseMicrophone?: boolean } = {}) {
+    clearInactivityTimer();
+    clearFollowUpCountdown();
+    followUpUsedRef.current = false;
+    followUpAwaitingCountdownRef.current = false;
     stopCapture();
     resetPlayback();
     stopSession();
     setListeningState("idle");
     setAwaitingResponse(false);
+    resetTurnDetection();
+    greetingTurnActiveRef.current = false;
+    followUpPromptActiveRef.current = false;
+    suppressAssistantAudioRef.current = false;
+    consecutiveBargeInFramesRef.current = 0;
+    if (options.releaseMicrophone) {
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+  }
+
+  function resetTurnDetection() {
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
     userSpeechActiveRef.current = false;
+    consecutiveSpeechFramesRef.current = 0;
+  }
+
+  function logVoiceState(label: string, detail?: Record<string, unknown>) {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.debug(`[voice-state] ${label}`, detail ?? {});
+    }
+  }
+
+  function isIdleListeningNow() {
+    return (
+      liveSocketRef.current?.readyState === WebSocket.OPEN &&
+      !assistantSpeakingRef.current &&
+      !awaitingResponseRef.current &&
+      !greetingTurnActiveRef.current &&
+      !followUpPromptActiveRef.current
+    );
+  }
+
+  function clearInactivityTimer() {
+    if (inactivityTimerRef.current) {
+      window.clearTimeout(inactivityTimerRef.current);
+      inactivityTimerRef.current = null;
+    }
+  }
+
+  function clearFollowUpCountdown() {
+    if (countdownIntervalRef.current) {
+      window.clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setCountdownSeconds(null);
+  }
+
+  // Arms the single 10s pre-prompt timer. Guarded by followUpUsedRef so the
+  // follow-up prompt can only ever be scheduled once per session, and by
+  // inactivityTimerRef so at most one such timer exists at a time.
+  function armInactivityTimerIfIdle() {
+    if (followUpUsedRef.current) {
+      return;
+    }
+    if (inactivityTimerRef.current || !isIdleListeningNow()) {
+      return;
+    }
+    logVoiceState("inactivity: 10s pre-prompt timer armed", { timeoutMs: INACTIVITY_TIMEOUT_MS });
+    inactivityTimerRef.current = window.setTimeout(() => {
+      inactivityTimerRef.current = null;
+      triggerInactivityPrompt();
+    }, INACTIVITY_TIMEOUT_MS);
+  }
+
+  // Any user interaction cancels whichever timer is currently pending: the
+  // pre-prompt wait, or the post-prompt closing countdown.
+  function registerUserInteraction(reason: string) {
+    if (inactivityTimerRef.current || countdownIntervalRef.current) {
+      logVoiceState("inactivity: user interaction detected, cancelling countdown", { reason });
+    }
+    clearInactivityTimer();
+    clearFollowUpCountdown();
+    followUpAwaitingCountdownRef.current = false;
+  }
+
+  function triggerInactivityPrompt() {
+    if (followUpUsedRef.current) {
+      return;
+    }
+    const socket = liveSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      logVoiceState("inactivity: prompt skipped, socket not open");
+      return;
+    }
+    logVoiceState("inactivity: 10s idle elapsed, asking the one-time follow-up prompt");
+    followUpUsedRef.current = true;
+    followUpAwaitingCountdownRef.current = true;
+    followUpPromptActiveRef.current = true;
+    assistantSpeakingRef.current = true;
+    setAssistantSpeaking(true);
+    socket.send(
+      JSON.stringify({
+        type: "text",
+        text: `Say "${inactivityFollowUpText}" and then wait for the user response.`,
+      }),
+    );
+  }
+
+  // Starts the single visible 5s countdown once the follow-up prompt has
+  // actually finished playing. Ending at zero closes the session.
+  function startFollowUpCountdown() {
+    clearFollowUpCountdown();
+    logVoiceState("inactivity: follow-up finished, starting closing countdown", {
+      seconds: FOLLOW_UP_COUNTDOWN_SECONDS,
+    });
+    let remaining = FOLLOW_UP_COUNTDOWN_SECONDS;
+    setCountdownSeconds(remaining);
+    countdownIntervalRef.current = window.setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearFollowUpCountdown();
+        endConversationDueToInactivity();
+        return;
+      }
+      setCountdownSeconds(remaining);
+    }, 1000);
+  }
+
+  function endConversationDueToInactivity() {
+    logVoiceState("inactivity: countdown elapsed with no response, ending session");
+    stopAll({ releaseMicrophone: true });
   }
 
   async function ensureMicrophone() {
@@ -258,6 +406,8 @@ export function VoiceAssistantPage() {
       setAssistantLevel(0);
       assistantLevelTimeoutRef.current = null;
     }, 120);
+    greetingTurnActiveRef.current = false;
+    followUpPromptActiveRef.current = false;
     assistantSpeakingRef.current = true;
     setAssistantSpeaking(true);
     if (assistantSpeechTimeoutRef.current) {
@@ -267,10 +417,16 @@ export function VoiceAssistantPage() {
       assistantSpeakingRef.current = false;
       setAssistantSpeaking(false);
       assistantSpeechTimeoutRef.current = null;
+      logVoiceState("assistant audio playback settled");
+      if (followUpAwaitingCountdownRef.current) {
+        followUpAwaitingCountdownRef.current = false;
+        startFollowUpCountdown();
+      }
     }, 800);
   }
 
   function handleLiveEvent(event: LiveServerEvent) {
+    logVoiceState("live event", { type: event.type });
     switch (event.type) {
       case "ready":
         setConnectionState("connected");
@@ -278,9 +434,22 @@ export function VoiceAssistantPage() {
       case "interrupted":
         suppressAssistantAudioRef.current = false;
         resetPlayback();
+        greetingTurnActiveRef.current = false;
+        followUpPromptActiveRef.current = false;
+        registerUserInteraction("interrupted");
+        setListeningState("listening");
+        setAwaitingResponse(false);
         break;
       case "input_transcript":
         appendTranscript("user", event.text);
+        if (event.text.trim()) {
+          if (!hadUserSpeechRef.current) {
+            logVoiceState("server confirmed real speech via input_transcript");
+          }
+          hadUserSpeechRef.current = true;
+          silenceFrameCountRef.current = 0;
+          registerUserInteraction("input_transcript");
+        }
         break;
       case "output_transcript":
         appendTranscript("assistant", event.text);
@@ -299,11 +468,21 @@ export function VoiceAssistantPage() {
         }
         break;
       case "turn_complete":
+        greetingTurnActiveRef.current = false;
+        followUpPromptActiveRef.current = false;
         if (assistantFinalizeTimeoutRef.current) {
           window.clearTimeout(assistantFinalizeTimeoutRef.current);
           assistantFinalizeTimeoutRef.current = null;
         }
         setAwaitingResponse(false);
+        resetTurnDetection();
+        // Safety net: if the follow-up turn completed without ever producing
+        // audio, the playback-settle callback will never fire to start the
+        // countdown. Start it here instead so the session still closes.
+        if (followUpAwaitingCountdownRef.current && !assistantSpeechTimeoutRef.current) {
+          followUpAwaitingCountdownRef.current = false;
+          startFollowUpCountdown();
+        }
         break;
       case "audio_chunk":
         playAudioChunk(event.data);
@@ -350,17 +529,19 @@ export function VoiceAssistantPage() {
         buildLiveWebSocketUrl(response.route.website_id, response.route.default_model),
       );
       liveSocketRef.current = socket;
+      let opened = false;
 
       socket.onopen = () => {
         if (liveSessionVersionRef.current !== sessionVersion) return;
+        opened = true;
         setConnectionState("connected");
+        resolve();
       };
 
       socket.onmessage = (message) => {
         if (liveSessionVersionRef.current !== sessionVersion) return;
         try {
           handleLiveEvent(JSON.parse(message.data) as LiveServerEvent);
-          resolve();
         } catch {
           // ignore
         }
@@ -368,6 +549,10 @@ export function VoiceAssistantPage() {
 
       socket.onclose = (event) => {
         if (liveSessionVersionRef.current !== sessionVersion) return;
+        if (!opened) {
+          reject(new Error("Gemini Live session closed before the connection opened."));
+          return;
+        }
         if (event.code !== 1000 && event.reason) {
           setError(`Gemini Live session closed: ${event.reason}`);
         }
@@ -441,11 +626,10 @@ export function VoiceAssistantPage() {
 
   async function startTalking() {
     setError(null);
+    setListeningState("listening");
     setAwaitingResponse(false);
     setTranscriptLog([]);
-    silenceFrameCountRef.current = 0;
-    hadUserSpeechRef.current = false;
-    userSpeechActiveRef.current = false;
+    resetTurnDetection();
     const resolvedWebsiteId = fixedWebsiteId;
     const stream = await ensureMicrophone();
     await ensureSession(resolvedWebsiteId);
@@ -461,9 +645,12 @@ export function VoiceAssistantPage() {
     socket.send(
       JSON.stringify({
         type: "text",
-        text: `Greet the user by saying exactly "${sessionGreetingText}" and then wait for the user response.`,
+        text: `Say "${sessionGreetingText}" and then wait for the user response.`,
       }),
     );
+    greetingTurnActiveRef.current = true;
+    assistantSpeakingRef.current = true;
+    setAssistantSpeaking(true);
 
     const AudioContextCtor = window.AudioContext || (window as typeof window & {
       webkitAudioContext?: typeof AudioContext;
@@ -504,7 +691,7 @@ export function VoiceAssistantPage() {
         lastChunkLogAt = Date.now();
       }
 
-      if (assistantSpeakingRef.current) {
+      if (assistantSpeakingRef.current || greetingTurnActiveRef.current || followUpPromptActiveRef.current) {
         if (micRms > bargeInThreshold) {
           consecutiveBargeInFramesRef.current += 1;
         } else {
@@ -518,6 +705,13 @@ export function VoiceAssistantPage() {
           consecutiveBargeInFramesRef.current = 0;
           suppressAssistantAudioRef.current = true;
           resetPlayback();
+          const wasFollowUpPrompt = followUpPromptActiveRef.current;
+          greetingTurnActiveRef.current = false;
+          followUpPromptActiveRef.current = false;
+          logVoiceState("barge-in detected, cutting assistant audio", { wasFollowUpPrompt });
+          registerUserInteraction("barge-in");
+          setListeningState("listening");
+          setAwaitingResponse(false);
         }
       } else {
         consecutiveBargeInFramesRef.current = 0;
@@ -526,20 +720,31 @@ export function VoiceAssistantPage() {
       const speechThreshold = 0.012;
       const silenceThreshold = 0.006;
       const requiredSilenceFrames = 14;
-      const speechActive = micRms > speechThreshold;
+      const requiredSpeechFrames = 3;
+      const speechFrameActive = micRms > speechThreshold;
+
+      if (speechFrameActive) {
+        consecutiveSpeechFramesRef.current += 1;
+      } else {
+        consecutiveSpeechFramesRef.current = 0;
+      }
+      const speechActive = consecutiveSpeechFramesRef.current >= requiredSpeechFrames;
 
       if (speechActive) {
         userSpeechActiveRef.current = true;
-        hadUserSpeechRef.current = true;
         silenceFrameCountRef.current = 0;
         setAwaitingResponse(false);
+        registerUserInteraction("mic-energy");
       } else if (userSpeechActiveRef.current && micRms < silenceThreshold) {
         silenceFrameCountRef.current += 1;
         if (hadUserSpeechRef.current && silenceFrameCountRef.current >= requiredSilenceFrames) {
           userSpeechActiveRef.current = false;
           silenceFrameCountRef.current = 0;
+          logVoiceState("silence after real speech, awaiting response");
           setAwaitingResponse(true);
         }
+      } else {
+        armInactivityTimerIfIdle();
       }
 
       // Stream continuously for the whole session, like the debug console does.
@@ -648,6 +853,11 @@ export function VoiceAssistantPage() {
               <div className="va-wave-caption">
                 <p className="va-state">{stateText}</p>
                 {hintText ? <p className="va-hint">{hintText}</p> : null}
+                {countdownSeconds !== null ? (
+                  <p className="va-countdown" role="status" aria-live="assertive">
+                    {`Session closing in ${countdownSeconds}...`}
+                  </p>
+                ) : null}
               </div>
             </div>
           </div>
