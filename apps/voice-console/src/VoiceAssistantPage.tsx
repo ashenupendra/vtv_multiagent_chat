@@ -72,6 +72,7 @@ export function VoiceAssistantPage() {
   const silenceFrameCountRef = useRef(0);
   const hadUserSpeechRef = useRef(false);
   const userSpeechActiveRef = useRef(false);
+  const consecutiveSpeechFramesRef = useRef(0);
   useEffect(() => {
     assistantSpeakingRef.current = assistantSpeaking;
   }, [assistantSpeaking]);
@@ -175,9 +176,21 @@ export function VoiceAssistantPage() {
     stopSession();
     setListeningState("idle");
     setAwaitingResponse(false);
+    resetTurnDetection();
+  }
+
+  function resetTurnDetection() {
     silenceFrameCountRef.current = 0;
     hadUserSpeechRef.current = false;
     userSpeechActiveRef.current = false;
+    consecutiveSpeechFramesRef.current = 0;
+  }
+
+  function logVoiceState(label: string, detail?: Record<string, unknown>) {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.debug(`[voice-state] ${label}`, detail ?? {});
+    }
   }
 
   async function ensureMicrophone() {
@@ -258,6 +271,7 @@ export function VoiceAssistantPage() {
       setAssistantLevel(0);
       assistantLevelTimeoutRef.current = null;
     }, 120);
+    greetingTurnActiveRef.current = false;
     assistantSpeakingRef.current = true;
     setAssistantSpeaking(true);
     if (assistantSpeechTimeoutRef.current) {
@@ -267,10 +281,12 @@ export function VoiceAssistantPage() {
       assistantSpeakingRef.current = false;
       setAssistantSpeaking(false);
       assistantSpeechTimeoutRef.current = null;
+      logVoiceState("assistant audio playback settled");
     }, 800);
   }
 
   function handleLiveEvent(event: LiveServerEvent) {
+    logVoiceState("live event", { type: event.type });
     switch (event.type) {
       case "ready":
         setConnectionState("connected");
@@ -284,6 +300,13 @@ export function VoiceAssistantPage() {
         break;
       case "input_transcript":
         appendTranscript("user", event.text);
+        if (event.text.trim()) {
+          if (!hadUserSpeechRef.current) {
+            logVoiceState("server confirmed real speech via input_transcript");
+          }
+          hadUserSpeechRef.current = true;
+          silenceFrameCountRef.current = 0;
+        }
         break;
       case "output_transcript":
         appendTranscript("assistant", event.text);
@@ -302,11 +325,13 @@ export function VoiceAssistantPage() {
         }
         break;
       case "turn_complete":
+        greetingTurnActiveRef.current = false;
         if (assistantFinalizeTimeoutRef.current) {
           window.clearTimeout(assistantFinalizeTimeoutRef.current);
           assistantFinalizeTimeoutRef.current = null;
         }
         setAwaitingResponse(false);
+        resetTurnDetection();
         break;
       case "audio_chunk":
         playAudioChunk(event.data);
@@ -453,9 +478,7 @@ export function VoiceAssistantPage() {
     setListeningState("listening");
     setAwaitingResponse(false);
     setTranscriptLog([]);
-    silenceFrameCountRef.current = 0;
-    hadUserSpeechRef.current = false;
-    userSpeechActiveRef.current = false;
+    resetTurnDetection();
     const resolvedWebsiteId = fixedWebsiteId;
     const stream = await ensureMicrophone();
     await ensureSession(resolvedWebsiteId);
@@ -532,6 +555,7 @@ export function VoiceAssistantPage() {
           suppressAssistantAudioRef.current = true;
           resetPlayback();
           greetingTurnActiveRef.current = false;
+          logVoiceState("barge-in detected, cutting assistant audio");
           setListeningState("listening");
           setAwaitingResponse(false);
         }
@@ -542,11 +566,18 @@ export function VoiceAssistantPage() {
       const speechThreshold = 0.012;
       const silenceThreshold = 0.006;
       const requiredSilenceFrames = 14;
-      const speechActive = micRms > speechThreshold;
+      const requiredSpeechFrames = 3;
+      const speechFrameActive = micRms > speechThreshold;
+
+      if (speechFrameActive) {
+        consecutiveSpeechFramesRef.current += 1;
+      } else {
+        consecutiveSpeechFramesRef.current = 0;
+      }
+      const speechActive = consecutiveSpeechFramesRef.current >= requiredSpeechFrames;
 
       if (speechActive) {
         userSpeechActiveRef.current = true;
-        hadUserSpeechRef.current = true;
         silenceFrameCountRef.current = 0;
         setAwaitingResponse(false);
       } else if (userSpeechActiveRef.current && micRms < silenceThreshold) {
@@ -554,6 +585,7 @@ export function VoiceAssistantPage() {
         if (hadUserSpeechRef.current && silenceFrameCountRef.current >= requiredSilenceFrames) {
           userSpeechActiveRef.current = false;
           silenceFrameCountRef.current = 0;
+          logVoiceState("silence after real speech, awaiting response");
           setAwaitingResponse(true);
         }
       }
