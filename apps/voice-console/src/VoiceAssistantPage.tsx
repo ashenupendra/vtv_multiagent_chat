@@ -36,7 +36,6 @@ const envSensitivityLevel = (import.meta.env.VITE_VOICE_SENSITIVITY_LEVEL as str
 const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
 const sessionGreetingText = "Hello! I’m the IRAS Tax Agent virtual assistant. How can I help you today?";
-
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
@@ -69,6 +68,7 @@ export function VoiceAssistantPage() {
   const micLevelTimeoutRef = useRef<number | null>(null);
   const assistantLevelTimeoutRef = useRef<number | null>(null);
   const assistantSpeakingRef = useRef(false);
+  const greetingTurnActiveRef = useRef(false);
   const silenceFrameCountRef = useRef(0);
   const hadUserSpeechRef = useRef(false);
   const userSpeechActiveRef = useRef(false);
@@ -278,6 +278,9 @@ export function VoiceAssistantPage() {
       case "interrupted":
         suppressAssistantAudioRef.current = false;
         resetPlayback();
+        greetingTurnActiveRef.current = false;
+        setListeningState("listening");
+        setAwaitingResponse(false);
         break;
       case "input_transcript":
         appendTranscript("user", event.text);
@@ -350,17 +353,19 @@ export function VoiceAssistantPage() {
         buildLiveWebSocketUrl(response.route.website_id, response.route.default_model),
       );
       liveSocketRef.current = socket;
+      let opened = false;
 
       socket.onopen = () => {
         if (liveSessionVersionRef.current !== sessionVersion) return;
+        opened = true;
         setConnectionState("connected");
+        resolve();
       };
 
       socket.onmessage = (message) => {
         if (liveSessionVersionRef.current !== sessionVersion) return;
         try {
           handleLiveEvent(JSON.parse(message.data) as LiveServerEvent);
-          resolve();
         } catch {
           // ignore
         }
@@ -368,6 +373,10 @@ export function VoiceAssistantPage() {
 
       socket.onclose = (event) => {
         if (liveSessionVersionRef.current !== sessionVersion) return;
+        if (!opened) {
+          reject(new Error("Gemini Live session closed before the connection opened."));
+          return;
+        }
         if (event.code !== 1000 && event.reason) {
           setError(`Gemini Live session closed: ${event.reason}`);
         }
@@ -441,6 +450,7 @@ export function VoiceAssistantPage() {
 
   async function startTalking() {
     setError(null);
+    setListeningState("listening");
     setAwaitingResponse(false);
     setTranscriptLog([]);
     silenceFrameCountRef.current = 0;
@@ -461,9 +471,12 @@ export function VoiceAssistantPage() {
     socket.send(
       JSON.stringify({
         type: "text",
-        text: `Greet the user by saying exactly "${sessionGreetingText}" and then wait for the user response.`,
+        text: `Say "${sessionGreetingText}" and then wait for the user response.`,
       }),
     );
+    greetingTurnActiveRef.current = true;
+    assistantSpeakingRef.current = true;
+    setAssistantSpeaking(true);
 
     const AudioContextCtor = window.AudioContext || (window as typeof window & {
       webkitAudioContext?: typeof AudioContext;
@@ -504,7 +517,7 @@ export function VoiceAssistantPage() {
         lastChunkLogAt = Date.now();
       }
 
-      if (assistantSpeakingRef.current) {
+      if (assistantSpeakingRef.current || greetingTurnActiveRef.current) {
         if (micRms > bargeInThreshold) {
           consecutiveBargeInFramesRef.current += 1;
         } else {
@@ -518,6 +531,9 @@ export function VoiceAssistantPage() {
           consecutiveBargeInFramesRef.current = 0;
           suppressAssistantAudioRef.current = true;
           resetPlayback();
+          greetingTurnActiveRef.current = false;
+          setListeningState("listening");
+          setAwaitingResponse(false);
         }
       } else {
         consecutiveBargeInFramesRef.current = 0;
