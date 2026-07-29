@@ -689,6 +689,7 @@ export function VoiceAssistantPage() {
 
   async function startTalking() {
     setError(null);
+    setConnectionState("connecting");
     setListeningState("listening");
     setAwaitingResponse(false);
     setTranscriptLog([]);
@@ -869,7 +870,9 @@ export function VoiceAssistantPage() {
     assistantSpeaking || awaitingResponse
       ? "Responding..."
       : listeningState === "listening"
-        ? "Listening..."
+        ? connectionState === "connecting"
+          ? "Connecting..."
+          : "Listening..."
         : "";
   const hintText = listeningState === "listening" || assistantSpeaking || awaitingResponse ? "Tap again to stop" : "";
   const isConversationActive = listeningState === "listening" || assistantSpeaking || awaitingResponse;
