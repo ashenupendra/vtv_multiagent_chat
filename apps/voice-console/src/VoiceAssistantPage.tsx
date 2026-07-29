@@ -94,6 +94,7 @@ export function VoiceAssistantPage() {
   // finishes playing, marking that the next "assistant done speaking" event
   // should start the closing countdown rather than just settle silently.
   const followUpAwaitingCountdownRef = useRef(false);
+  const followUpAttemptCountRef = useRef(0);
   const followUpCountdownCeilingTimerRef = useRef<number | null>(null);
   const inactivityTimerRef = useRef<number | null>(null);
   const countdownIntervalRef = useRef<number | null>(null);
@@ -214,6 +215,7 @@ export function VoiceAssistantPage() {
     resetTurnDetection();
     greetingTurnActiveRef.current = false;
     followUpPromptActiveRef.current = false;
+    followUpAttemptCountRef.current = 0;
     suppressAssistantAudioRef.current = false;
     consecutiveBargeInFramesRef.current = 0;
     if (options.releaseMicrophone) {
@@ -310,6 +312,9 @@ export function VoiceAssistantPage() {
       followUpAwaitingCountdownRef.current = false;
       clearFollowUpCountdownCeiling();
     }
+    if (reason === "input_transcript" || reason === "barge-in" || reason === "interrupted") {
+      followUpAttemptCountRef.current = 0;
+    }
   }
 
   function triggerInactivityPrompt() {
@@ -321,7 +326,10 @@ export function VoiceAssistantPage() {
       logVoiceState("inactivity: prompt skipped, socket not open");
       return;
     }
-    logVoiceState("inactivity: 10s idle elapsed, asking the follow-up prompt");
+    followUpAttemptCountRef.current = Math.min(2, followUpAttemptCountRef.current + 1);
+    logVoiceState(
+      `inactivity: 10s idle elapsed, asking follow-up prompt attempt ${followUpAttemptCountRef.current}`,
+    );
     followUpAwaitingCountdownRef.current = true;
     followUpPromptActiveRef.current = true;
     assistantSpeakingRef.current = true;
@@ -347,6 +355,13 @@ export function VoiceAssistantPage() {
   // actually finished playing. Ending at zero closes the session.
   function startFollowUpCountdown() {
     clearFollowUpCountdown();
+    if (followUpAttemptCountRef.current >= 2) {
+      logVoiceState("inactivity: second follow-up attempt finished, closing session immediately");
+      followUpAwaitingCountdownRef.current = false;
+      clearFollowUpCountdownCeiling();
+      endConversationDueToInactivity();
+      return;
+    }
     logVoiceState("inactivity: follow-up finished, starting closing countdown", {
       seconds: FOLLOW_UP_COUNTDOWN_SECONDS,
     });
