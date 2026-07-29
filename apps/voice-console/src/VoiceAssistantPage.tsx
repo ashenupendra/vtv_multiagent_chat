@@ -37,10 +37,19 @@ const defaultSensitivityLevel: SensitivityLevel =
   envSensitivityLevel === "low" || envSensitivityLevel === "high" ? envSensitivityLevel : "medium";
 const sessionGreetingText = "Hello! I’m the IRAS Tax Agent virtual assistant. How can I help you today?";
 const inactivityFollowUpText =    "If you don't have any more questions, I'll end our conversation here in a few seconds. If there's anything else you'd like to ask, just start speaking and I'll be happy to help.";
-// Silence after the assistant finishes speaking, before the one-time follow-up prompt.
+// Silence after the assistant finishes speaking, before it asks the follow-up prompt.
 const INACTIVITY_TIMEOUT_MS = 10_000;
 // Visible countdown after the follow-up prompt finishes speaking, before the session ends.
-const FOLLOW_UP_COUNTDOWN_SECONDS = 5;
+const FOLLOW_UP_COUNTDOWN_SECONDS = 9;
+// Small buffer added after the last scheduled audio buffer finishes playing,
+// to account for scheduling/output latency before declaring speech "settled".
+const PLAYBACK_SETTLE_TAIL_MS = 150;
+// Hard ceiling from when the follow-up prompt is triggered to when the
+// closing countdown must have started. Guarantees the session still ends
+// (or recovers to ask again next idle period) instead of hanging open with
+// a live microphone if some unforeseen event ordering ever leaves the
+// countdown un-started.
+const FOLLOW_UP_COUNTDOWN_CEILING_MS = 15_000;
 export function VoiceAssistantPage() {
   const [error, setError] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
@@ -81,12 +90,11 @@ export function VoiceAssistantPage() {
   const userSpeechActiveRef = useRef(false);
   const consecutiveSpeechFramesRef = useRef(0);
   const followUpPromptActiveRef = useRef(false);
-  // One-shot gate: the follow-up prompt may be spoken at most once per session.
-  const followUpUsedRef = useRef(false);
   // True from the moment the follow-up prompt is triggered until its audio
   // finishes playing, marking that the next "assistant done speaking" event
   // should start the closing countdown rather than just settle silently.
   const followUpAwaitingCountdownRef = useRef(false);
+  const followUpCountdownCeilingTimerRef = useRef<number | null>(null);
   const inactivityTimerRef = useRef<number | null>(null);
   const countdownIntervalRef = useRef<number | null>(null);
   useEffect(() => {
@@ -121,6 +129,7 @@ export function VoiceAssistantPage() {
     // Playback was cut short (barge-in/interrupt); the follow-up prompt, if
     // any was in flight, never finished, so don't start a countdown for it.
     followUpAwaitingCountdownRef.current = false;
+    clearFollowUpCountdownCeiling();
     if (assistantSpeechTimeoutRef.current) {
       window.clearTimeout(assistantSpeechTimeoutRef.current);
       assistantSpeechTimeoutRef.current = null;
@@ -195,7 +204,7 @@ export function VoiceAssistantPage() {
   function stopAll(options: { releaseMicrophone?: boolean } = {}) {
     clearInactivityTimer();
     clearFollowUpCountdown();
-    followUpUsedRef.current = false;
+    clearFollowUpCountdownCeiling();
     followUpAwaitingCountdownRef.current = false;
     stopCapture();
     resetPlayback();
@@ -252,14 +261,27 @@ export function VoiceAssistantPage() {
     setCountdownSeconds(null);
   }
 
-  // Arms the single 10s pre-prompt timer. Guarded by followUpUsedRef so the
-  // follow-up prompt can only ever be scheduled once per session, and by
-  // inactivityTimerRef so at most one such timer exists at a time.
-  function armInactivityTimerIfIdle() {
-    if (followUpUsedRef.current) {
-      return;
+  function clearFollowUpCountdownCeiling() {
+    if (followUpCountdownCeilingTimerRef.current) {
+      window.clearTimeout(followUpCountdownCeilingTimerRef.current);
+      followUpCountdownCeilingTimerRef.current = null;
     }
-    if (inactivityTimerRef.current || !isIdleListeningNow()) {
+  }
+
+  // True while a follow-up cycle is currently in flight: the prompt is being
+  // spoken, or the closing countdown is ticking. Re-arming the pre-prompt
+  // timer during this window would race the countdown/close flow.
+  function isFollowUpCycleInFlight() {
+    return followUpAwaitingCountdownRef.current || countdownIntervalRef.current !== null;
+  }
+
+  // Arms the single 10s pre-prompt timer. Guarded by inactivityTimerRef so at
+  // most one such timer exists at a time. Not a one-shot: if the user responds
+  // and later goes idle again, or a prior follow-up cycle somehow never closed
+  // the session, this fires again - the follow-up prompt is always allowed to
+  // recover and retry closing rather than leaving the session stuck open.
+  function armInactivityTimerIfIdle() {
+    if (inactivityTimerRef.current || isFollowUpCycleInFlight() || !isIdleListeningNow()) {
       return;
     }
     logVoiceState("inactivity: 10s pre-prompt timer armed", { timeoutMs: INACTIVITY_TIMEOUT_MS });
@@ -277,11 +299,21 @@ export function VoiceAssistantPage() {
     }
     clearInactivityTimer();
     clearFollowUpCountdown();
-    followUpAwaitingCountdownRef.current = false;
+    // While the follow-up prompt is still playing, only a confirmed signal
+    // (real barge-in, an "interrupted" event, or server-confirmed transcript
+    // text) may cancel it. Plain mic-energy is too easily false-triggered by
+    // background noise or the assistant's own voice bleeding into the mic
+    // (no headphones/echo cancellation) during that window, and a false
+    // cancel here would leave the follow-up cycle stranded with the
+    // countdown never starting.
+    if (reason !== "mic-energy") {
+      followUpAwaitingCountdownRef.current = false;
+      clearFollowUpCountdownCeiling();
+    }
   }
 
   function triggerInactivityPrompt() {
-    if (followUpUsedRef.current) {
+    if (isFollowUpCycleInFlight()) {
       return;
     }
     const socket = liveSocketRef.current;
@@ -289,8 +321,7 @@ export function VoiceAssistantPage() {
       logVoiceState("inactivity: prompt skipped, socket not open");
       return;
     }
-    logVoiceState("inactivity: 10s idle elapsed, asking the one-time follow-up prompt");
-    followUpUsedRef.current = true;
+    logVoiceState("inactivity: 10s idle elapsed, asking the follow-up prompt");
     followUpAwaitingCountdownRef.current = true;
     followUpPromptActiveRef.current = true;
     assistantSpeakingRef.current = true;
@@ -301,9 +332,18 @@ export function VoiceAssistantPage() {
         text: `Say "${inactivityFollowUpText}" and then wait for the user response.`,
       }),
     );
+    clearFollowUpCountdownCeiling();
+    followUpCountdownCeilingTimerRef.current = window.setTimeout(() => {
+      followUpCountdownCeilingTimerRef.current = null;
+      if (followUpAwaitingCountdownRef.current) {
+        logVoiceState("inactivity: countdown ceiling reached, forcing countdown start");
+        followUpAwaitingCountdownRef.current = false;
+        startFollowUpCountdown();
+      }
+    }, FOLLOW_UP_COUNTDOWN_CEILING_MS);
   }
 
-  // Starts the single visible 5s countdown once the follow-up prompt has
+  // Starts the single visible countdown once the follow-up prompt has
   // actually finished playing. Ending at zero closes the session.
   function startFollowUpCountdown() {
     clearFollowUpCountdown();
@@ -413,6 +453,12 @@ export function VoiceAssistantPage() {
     if (assistantSpeechTimeoutRef.current) {
       window.clearTimeout(assistantSpeechTimeoutRef.current);
     }
+    // Chunks are scheduled ahead of real-time (nextStartTimeRef can sit
+    // several seconds in the future for a long sentence), so "settled" must
+    // wait for the actual scheduled playback to finish, not just a fixed
+    // delay after this chunk's data arrived over the socket.
+    const remainingPlaybackMs = Math.max(0, (nextStartTimeRef.current - ctx.currentTime) * 1000);
+    const settleDelayMs = remainingPlaybackMs + PLAYBACK_SETTLE_TAIL_MS;
     assistantSpeechTimeoutRef.current = window.setTimeout(() => {
       assistantSpeakingRef.current = false;
       setAssistantSpeaking(false);
@@ -420,9 +466,10 @@ export function VoiceAssistantPage() {
       logVoiceState("assistant audio playback settled");
       if (followUpAwaitingCountdownRef.current) {
         followUpAwaitingCountdownRef.current = false;
+        clearFollowUpCountdownCeiling();
         startFollowUpCountdown();
       }
-    }, 800);
+    }, settleDelayMs);
   }
 
   function handleLiveEvent(event: LiveServerEvent) {
@@ -481,6 +528,7 @@ export function VoiceAssistantPage() {
         // countdown. Start it here instead so the session still closes.
         if (followUpAwaitingCountdownRef.current && !assistantSpeechTimeoutRef.current) {
           followUpAwaitingCountdownRef.current = false;
+          clearFollowUpCountdownCeiling();
           startFollowUpCountdown();
         }
         break;
