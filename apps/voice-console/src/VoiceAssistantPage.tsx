@@ -911,6 +911,10 @@ export function VoiceAssistantPage() {
                   onClick={handleTap}
                   aria-label={listeningState === "listening" || assistantSpeaking ? "Tap to stop" : "Tap to talk"}
                 >
+                  <div className="va-orb-wave" aria-hidden="true">
+                    <div className="va-orb-wave-layer va-orb-wave-layer--back" />
+                    <div className="va-orb-wave-layer va-orb-wave-layer--front" />
+                  </div>
                   <div className="va-orb-badge">
                     <img className="va-orb-badge-logo" src={irasLogo} alt="IRAS logo" />
                   </div>
