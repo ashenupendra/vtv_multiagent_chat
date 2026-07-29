@@ -514,7 +514,7 @@ export function VoiceAssistantPage() {
         }
         break;
       case "output_transcript":
-        appendTranscript("assistant", event.text);
+        appendTranscript("assistant", sanitizeAssistantText(event.text));
         scheduleAssistantReplyFinalize();
         if (suppressAssistantAudioRef.current) {
           suppressAssistantAudioRef.current = false;
@@ -522,7 +522,7 @@ export function VoiceAssistantPage() {
         }
         break;
       case "model_text":
-        appendTranscript("assistant", event.text);
+        appendTranscript("assistant", sanitizeAssistantText(event.text));
         scheduleAssistantReplyFinalize();
         if (suppressAssistantAudioRef.current) {
           suppressAssistantAudioRef.current = false;
@@ -950,6 +950,10 @@ export function VoiceAssistantPage() {
       </section>
     </main>
   );
+}
+
+function sanitizeAssistantText(text: string) {
+  return text.replace(/\s*\[\d+\]/g, "");
 }
 
 function joinTranscriptContent(current: string, next: string) {
