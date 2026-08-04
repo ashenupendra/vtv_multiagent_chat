@@ -25,6 +25,11 @@ import {
   TextArea,
   TextInput,
 } from "@ira/ui";
+import {
+  logSensitiveDataBlocked,
+  scanForSensitiveData,
+  SENSITIVE_DATA_BLOCK_MESSAGE,
+} from "@ira/sensitive-data";
 
 const sessionStorageKey = "ira-admin-token";
 
@@ -486,13 +491,19 @@ export default function App() {
         throw new Error("Set an active website ID before testing route behavior.");
       }
 
+      const findings = scanForSensitiveData(routeForm.message);
+      if (findings.length > 0) {
+        logSensitiveDataBlocked(findings, { app: "admin-portal", websiteId: resolvedWebsiteId });
+        setError(SENSITIVE_DATA_BLOCK_MESSAGE);
+        return;
+      }
+
       const response = await publicClient.routeConversation({
         mode: routeForm.mode as "text" | "voice",
         website_id: resolvedWebsiteId,
         session_id: "admin-portal-test-session",
         message: routeForm.message,
         history: [],
-        language_hint: "en-US",
       });
       setRouteResult(response);
     } catch (routeError) {

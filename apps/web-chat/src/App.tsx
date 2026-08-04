@@ -15,6 +15,11 @@ import {
   TextArea,
   TextInput,
 } from "@ira/ui";
+import {
+  logSensitiveDataBlocked,
+  scanForSensitiveData,
+  SENSITIVE_DATA_BLOCK_MESSAGE,
+} from "@ira/sensitive-data";
 
 const defaultPrompt = "What services does this website provide?";
 
@@ -30,8 +35,16 @@ export default function App() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setLoading(true);
     setError(null);
+
+    const findings = scanForSensitiveData(message);
+    if (findings.length > 0) {
+      logSensitiveDataBlocked(findings, { app: "web-chat", websiteId });
+      setError(SENSITIVE_DATA_BLOCK_MESSAGE);
+      return;
+    }
+
+    setLoading(true);
 
     try {
       const response = await client.routeConversation({

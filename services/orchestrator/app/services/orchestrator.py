@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -30,6 +31,9 @@ from app.schemas.orchestration import (
 from app.services.agents import AgentContext, TextChatAgent, VoiceProcessingAgent
 from app.services.crawler import WebsiteCrawler
 from app.services.prompts import PromptContext, RetrievedSnippet, build_prompt_blueprint
+from app.services.sensitive_data import SensitiveDataDetectedError, scan_for_sensitive_data
+
+logger = logging.getLogger(__name__)
 
 
 class OrchestratorService:
@@ -41,6 +45,19 @@ class OrchestratorService:
         self._crawler = WebsiteCrawler()
 
     def route_conversation(self, request: OrchestrationRequest) -> OrchestrationResponse:
+        findings = scan_for_sensitive_data(request.message)
+        if findings:
+            logger.warning(
+                "Blocked orchestration request containing sensitive data",
+                extra={
+                    "website_id": request.website_id,
+                    "session_id": request.session_id,
+                    "mode": request.mode,
+                    "categories": sorted({finding.category for finding in findings}),
+                },
+            )
+            raise SensitiveDataDetectedError(findings)
+
         context = AgentContext(
             website_id=request.website_id,
             session_id=request.session_id,

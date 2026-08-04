@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.deps import get_current_admin_session
 from app.core.config import get_settings
+from app.services.sensitive_data import BLOCK_MESSAGE, SensitiveDataDetectedError
 from app.schemas.orchestration import (
     CrawlJobCreateResponse,
     CrawlJobListResponse,
@@ -28,7 +29,10 @@ router = APIRouter(prefix="/orchestration", tags=["orchestration"])
 @router.post("/route", response_model=OrchestrationResponse)
 def route_conversation(request: OrchestrationRequest) -> OrchestrationResponse:
     service = OrchestratorService(get_settings())
-    return service.route_conversation(request)
+    try:
+        return service.route_conversation(request)
+    except SensitiveDataDetectedError as error:
+        raise HTTPException(status_code=422, detail=BLOCK_MESSAGE) from error
 
 
 @router.post("/websites", response_model=WebsiteOnboardingResponse)

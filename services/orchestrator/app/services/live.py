@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,9 @@ from app.schemas.live import (
 )
 from app.services.prompts import PromptContext, RetrievedSnippet, build_prompt_blueprint
 from app.services.orchestrator import OrchestratorService
+from app.services.sensitive_data import BLOCK_MESSAGE, scan_for_sensitive_data
+
+logger = logging.getLogger(__name__)
 
 
 class LiveProxyService:
@@ -144,20 +148,50 @@ class LiveProxyService:
                                 and awaiting_audio_grounding
                                 and isinstance(event.get("text"), str)
                             ):
-                                grounding_message, grounding_event = (
-                                    self._build_audio_grounding_turn(
-                                        website_id,
-                                        event["text"],
+                                transcript = event["text"]
+                                findings = scan_for_sensitive_data(transcript)
+                                if findings:
+                                    categories = sorted(
+                                        {finding.category for finding in findings}
                                     )
-                                )
-                                stored_event = self._store_live_grounding_event(
-                                    website_id=website_id,
-                                    session_id=session_id,
-                                    event=grounding_event,
-                                )
-                                await client_socket.send_json(stored_event)
-                                if grounding_message is not None:
-                                    await live_socket.send(json.dumps(grounding_message))
+                                    logger.warning(
+                                        "Blocked live audio turn containing sensitive data",
+                                        extra={
+                                            "website_id": website_id,
+                                            "session_id": session_id,
+                                            "categories": categories,
+                                        },
+                                    )
+                                    # The transcript already reached Gemini's own
+                                    # speech-to-text (that happens on the raw
+                                    # audio stream before this event exists), but
+                                    # from here on we stop it in its tracks: no
+                                    # RAG lookup, no re-injection into the live
+                                    # session, and nothing persisted to grounding
+                                    # history.
+                                    await client_socket.send_json(
+                                        {
+                                            "type": "blocked",
+                                            "source": "audio",
+                                            "message": BLOCK_MESSAGE,
+                                            "categories": categories,
+                                        }
+                                    )
+                                else:
+                                    grounding_message, grounding_event = (
+                                        self._build_audio_grounding_turn(
+                                            website_id,
+                                            transcript,
+                                        )
+                                    )
+                                    stored_event = self._store_live_grounding_event(
+                                        website_id=website_id,
+                                        session_id=session_id,
+                                        event=grounding_event,
+                                    )
+                                    await client_socket.send_json(stored_event)
+                                    if grounding_message is not None:
+                                        await live_socket.send(json.dumps(grounding_message))
                                 awaiting_audio_grounding = False
                             elif event.get("type") == "turn_complete" and awaiting_audio_grounding:
                                 awaiting_audio_grounding = False
@@ -262,6 +296,25 @@ class LiveProxyService:
             text = payload.get("text")
             if not isinstance(text, str) or not text.strip():
                 return [], [], False
+            findings = scan_for_sensitive_data(text)
+            if findings:
+                categories = sorted({finding.category for finding in findings})
+                logger.warning(
+                    "Blocked live text turn containing sensitive data",
+                    extra={"website_id": website_id, "categories": categories},
+                )
+                return (
+                    [],
+                    [
+                        {
+                            "type": "blocked",
+                            "source": "text",
+                            "message": BLOCK_MESSAGE,
+                            "categories": categories,
+                        }
+                    ],
+                    False,
+                )
             message, event = self._build_text_turn_message(website_id, text)
             return [message], [event], False
 

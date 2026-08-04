@@ -58,6 +58,38 @@ def test_build_audio_grounding_turn_returns_follow_up_message() -> None:
     assert event["citations"][0]["label"] == "[1]"
 
 
+def test_map_client_message_blocks_sensitive_text_before_forwarding() -> None:
+    service = LiveProxyService(Settings())
+    service._orchestrator_service.build_retrieval_matches = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("RAG lookup must not run for blocked messages")
+    )
+
+    messages, events, should_await = service._map_client_message(  # type: ignore[attr-defined]
+        {"type": "text", "text": "My card number is 4111 1111 1111 1111"},
+        "example-site",
+    )
+
+    assert messages == []
+    assert should_await is False
+    assert len(events) == 1
+    assert events[0]["type"] == "blocked"
+    assert events[0]["source"] == "text"
+    assert "Credit or debit card number" in events[0]["categories"]
+
+
+def test_map_client_message_forwards_clean_text() -> None:
+    service = LiveProxyService(Settings())
+    service._orchestrator_service.build_retrieval_matches = lambda website_id, query, limit=3: []  # type: ignore[method-assign]
+
+    messages, events, should_await = service._map_client_message(  # type: ignore[attr-defined]
+        {"type": "text", "text": "Can you help with onboarding?"},
+        "example-site",
+    )
+
+    assert len(messages) == 1
+    assert events[0]["type"] == "grounding"
+
+
 def test_live_grounding_history_is_persisted_and_loaded() -> None:
     service = LiveProxyService(Settings())
 
