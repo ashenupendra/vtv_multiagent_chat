@@ -452,5 +452,21 @@ export function createIraApiClient(options: ClientOptions = {}) {
         options,
       );
     },
+    /**
+     * Admin Portal's routing/prompt preview tool. Requires an authenticated
+     * admin session and, unlike routeConversation, intentionally skips the
+     * runtime sensitive-data filter - administrators may test with content
+     * that looks like PII and that must not be blocked.
+     */
+    previewRouteConversation(payload: RouteConversationPayload) {
+      return request<RouteConversationResponse>(
+        "/api/orchestration/route/admin-preview",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+        options,
+      );
+    },
   };
 }

@@ -109,3 +109,62 @@ def test_route_conversation_allows_clean_text() -> None:
     )
 
     assert response.status_code == 200
+
+
+def _admin_token() -> str:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "change-me"},
+    )
+    return login_response.json()["access_token"]
+
+
+def test_admin_preview_route_bypasses_sensitive_data_filter() -> None:
+    token = _admin_token()
+
+    response = client.post(
+        "/api/orchestration/route/admin-preview",
+        json={
+            "mode": "text",
+            "website_id": "any-site",
+            "session_id": "admin-preview-session",
+            "message": "Sample content with SSN 123-45-6789 for a knowledge base test.",
+            "history": [],
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_admin_preview_route_requires_admin_session() -> None:
+    response = client.post(
+        "/api/orchestration/route/admin-preview",
+        json={
+            "mode": "text",
+            "website_id": "any-site",
+            "session_id": "admin-preview-session-unauth",
+            "message": "Can you help me with pricing questions?",
+            "history": [],
+        },
+    )
+
+    assert response.status_code in (401, 403)
+
+
+def test_public_route_still_blocks_even_with_admin_style_payload() -> None:
+    # The sensitive-data filter must remain in force on the real end-user
+    # entry point regardless of payload shape - only the dedicated
+    # admin-authenticated preview endpoint may bypass it.
+    response = client.post(
+        "/api/orchestration/route",
+        json={
+            "mode": "text",
+            "website_id": "any-site",
+            "session_id": "public-route-session",
+            "message": "My passport number is N1234567",
+            "history": [],
+        },
+    )
+
+    assert response.status_code == 422

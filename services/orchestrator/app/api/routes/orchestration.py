@@ -28,11 +28,25 @@ router = APIRouter(prefix="/orchestration", tags=["orchestration"])
 
 @router.post("/route", response_model=OrchestrationResponse)
 def route_conversation(request: OrchestrationRequest) -> OrchestrationResponse:
+    """Real end-user Voice Chat / Text Chat entry point. The sensitive-data
+    filter always runs here."""
     service = OrchestratorService(get_settings())
     try:
         return service.route_conversation(request)
     except SensitiveDataDetectedError as error:
         raise HTTPException(status_code=422, detail=BLOCK_MESSAGE) from error
+
+
+@router.post("/route/admin-preview", response_model=OrchestrationResponse)
+def preview_route_conversation(
+    request: OrchestrationRequest,
+    _: AdminSession = Depends(get_current_admin_session),
+) -> OrchestrationResponse:
+    """Admin Portal's routing/prompt preview tool. Requires an admin session
+    and intentionally skips the sensitive-data filter: administrators may
+    test with content that looks like PII and that must not be blocked."""
+    service = OrchestratorService(get_settings())
+    return service.route_conversation(request, enforce_sensitive_filter=False)
 
 
 @router.post("/websites", response_model=WebsiteOnboardingResponse)

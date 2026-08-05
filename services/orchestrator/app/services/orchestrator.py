@@ -44,19 +44,31 @@ class OrchestratorService:
         self._voice_agent = VoiceProcessingAgent(settings.google_runtime.live_model)
         self._crawler = WebsiteCrawler()
 
-    def route_conversation(self, request: OrchestrationRequest) -> OrchestrationResponse:
-        findings = scan_for_sensitive_data(request.message)
-        if findings:
-            logger.warning(
-                "Blocked orchestration request containing sensitive data",
-                extra={
-                    "website_id": request.website_id,
-                    "session_id": request.session_id,
-                    "mode": request.mode,
-                    "categories": sorted({finding.category for finding in findings}),
-                },
-            )
-            raise SensitiveDataDetectedError(findings)
+    def route_conversation(
+        self,
+        request: OrchestrationRequest,
+        *,
+        enforce_sensitive_filter: bool = True,
+    ) -> OrchestrationResponse:
+        # The sensitive-data filter protects real end-user Voice Chat and Text
+        # Chat traffic only. Admin Portal callers (e.g. the route preview tool
+        # used to inspect prompt/routing behavior) opt out via
+        # enforce_sensitive_filter=False - administrators may intentionally
+        # test with content that looks like PII, and that must never be
+        # blocked by the runtime conversation filter.
+        if enforce_sensitive_filter:
+            findings = scan_for_sensitive_data(request.message)
+            if findings:
+                logger.warning(
+                    "Blocked orchestration request containing sensitive data",
+                    extra={
+                        "website_id": request.website_id,
+                        "session_id": request.session_id,
+                        "mode": request.mode,
+                        "categories": sorted({finding.category for finding in findings}),
+                    },
+                )
+                raise SensitiveDataDetectedError(findings)
 
         context = AgentContext(
             website_id=request.website_id,
