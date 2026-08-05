@@ -58,6 +58,35 @@ def test_build_audio_grounding_turn_returns_follow_up_message() -> None:
     assert event["citations"][0]["label"] == "[1]"
 
 
+def test_text_turn_includes_language_directive_even_without_matches() -> None:
+    service = LiveProxyService(Settings())
+    service._orchestrator_service.build_retrieval_matches = lambda website_id, query, limit=3: []  # type: ignore[method-assign]
+
+    message, _event = service._build_text_turn_message(  # type: ignore[attr-defined]
+        "example-site",
+        "Mama oyata ape sathkaraya gena kathaa karanna oona.",
+    )
+
+    grounded_text = message["clientContent"]["turns"][0]["parts"][0]["text"]
+    assert "detect the language of this message" in grounded_text.lower()
+    assert "Mama oyata ape sathkaraya gena kathaa karanna oona." in grounded_text
+
+
+def test_audio_grounding_turn_includes_language_directive_even_without_matches() -> None:
+    service = LiveProxyService(Settings())
+    service._orchestrator_service.build_retrieval_matches = lambda website_id, query, limit=3: []  # type: ignore[method-assign]
+
+    message, _event = service._build_audio_grounding_turn(  # type: ignore[attr-defined]
+        "example-site",
+        "Nan mozhiyai support venum.",
+    )
+
+    assert message is not None
+    grounded_text = message["clientContent"]["turns"][0]["parts"][0]["text"]
+    assert "detect the language of this message" in grounded_text.lower()
+    assert "Nan mozhiyai support venum." in grounded_text
+
+
 def test_map_client_message_blocks_sensitive_text_before_forwarding() -> None:
     service = LiveProxyService(Settings())
     service._orchestrator_service.build_retrieval_matches = lambda *args, **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]

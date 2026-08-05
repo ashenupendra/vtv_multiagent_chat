@@ -438,7 +438,10 @@ export function VoiceAssistantPage() {
     socket.send(
       JSON.stringify({
         type: "text",
-        text: `Say "${inactivityFollowUpText}" and then wait for the user response.`,
+        text:
+          `Say "${inactivityFollowUpText}" and then wait for the user response. ` +
+          "Say this in whatever language the conversation has been using so far, not English, " +
+          "unless the conversation has genuinely been in English.",
       }),
     );
     clearFollowUpCountdownCeiling();
@@ -817,7 +820,13 @@ export function VoiceAssistantPage() {
     socket.send(
       JSON.stringify({
         type: "text",
-        text: `Say "${sessionGreetingText}" and then wait for the user response.`,
+        text:
+          `Say "${sessionGreetingText}" and then wait for the user response. ` +
+          "This greeting is in English only for branding reasons and does not set or lock the " +
+          "conversation's language - the moment the user replies, detect the language of that " +
+          "reply on its own merits and respond in that language from then on, even though the " +
+          "greeting was in English, and keep switching languages on every later turn to match " +
+          "whatever the user speaks.",
       }),
     );
     greetingTurnActiveRef.current = true;
