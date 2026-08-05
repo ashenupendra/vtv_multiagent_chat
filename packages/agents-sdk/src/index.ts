@@ -242,6 +242,25 @@ export type RouteConversationResponse = {
   observability_trace_id: string;
 };
 
+export type ChatMessagePayload = {
+  role: "user" | "assistant" | "system";
+  content: string;
+};
+
+export type ChatPayload = {
+  website_id: string;
+  session_id: string;
+  message: string;
+  history: ChatMessagePayload[];
+};
+
+export type ChatResponse = {
+  status: "answered";
+  reply: string;
+  citations: CitationRecord[];
+  observability_trace_id: string;
+};
+
 type ClientOptions = {
   baseUrl?: string;
   token?: string | null;
@@ -461,6 +480,21 @@ export function createIraApiClient(options: ClientOptions = {}) {
     previewRouteConversation(payload: RouteConversationPayload) {
       return request<RouteConversationResponse>(
         "/api/orchestration/route/admin-preview",
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+        options,
+      );
+    },
+    /**
+     * Real Text Chat entry point - returns an actual AI-generated reply
+     * (unlike routeConversation, which only returns the prompt/routing
+     * plan). Always runs the sensitive-data filter first.
+     */
+    sendChatMessage(payload: ChatPayload) {
+      return request<ChatResponse>(
+        "/api/orchestration/chat",
         {
           method: "POST",
           body: JSON.stringify(payload),

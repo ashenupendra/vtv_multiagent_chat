@@ -4,10 +4,15 @@ import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import httpx
+
 from app.core.config import Settings
 from app.repositories.chroma import ChromaRepository, RAGDocumentRecord
 from app.schemas.orchestration import (
     AgentSelection,
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
     CitationRecord,
     CrawlJobCreateResponse,
     CrawlJobListResponse,
@@ -155,6 +160,88 @@ class OrchestratorService:
             fallback_message=plan.fallback_message,
             observability_trace_id=f"trace-{uuid4()}",
         )
+
+    def generate_reply(self, request: ChatRequest) -> ChatResponse:
+        """Real end-user Text Chat entry point: builds the routing/prompt plan
+        (which always enforces the sensitive-data filter for this path), then
+        actually calls Gemini to produce a reply, unlike route_conversation
+        which only returns the prompt/routing plan itself."""
+        route_response = self.route_conversation(
+            OrchestrationRequest(
+                mode="text",
+                website_id=request.website_id,
+                session_id=request.session_id,
+                message=request.message,
+                history=request.history,
+            )
+        )
+
+        reply_text = self._generate_text_reply(
+            model=route_response.route.default_model,
+            system_prompt=route_response.route.system_prompt or "",
+            history=request.history,
+            message=request.message,
+        )
+        if not reply_text.strip():
+            reply_text = route_response.fallback_message
+
+        return ChatResponse(
+            status="answered",
+            reply=reply_text,
+            citations=route_response.route.citations,
+            observability_trace_id=route_response.observability_trace_id,
+        )
+
+    def _generate_text_reply(
+        self,
+        model: str,
+        system_prompt: str,
+        history: list[ChatMessage],
+        message: str,
+    ) -> str:
+        if not self._settings.google_runtime.api_key_configured:
+            return "AI text generation is not configured (GOOGLE_API_KEY is missing)."
+
+        contents = [
+            {
+                "role": "model" if turn.role == "assistant" else "user",
+                "parts": [{"text": turn.content}],
+            }
+            for turn in history
+            if turn.role in ("user", "assistant")
+        ]
+        contents.append({"role": "user", "parts": [{"text": message}]})
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        try:
+            response = httpx.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self._settings.google_api_key,
+                },
+                json={
+                    "systemInstruction": {"parts": [{"text": system_prompt}]},
+                    "contents": contents,
+                },
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as error:
+            logger.error("Gemini text generation request failed", extra={"error": str(error)})
+            return ""
+
+        candidates = payload.get("candidates") if isinstance(payload, dict) else None
+        if not isinstance(candidates, list) or not candidates:
+            return ""
+        content = candidates[0].get("content") if isinstance(candidates[0], dict) else None
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            return ""
+        return "".join(
+            part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ).strip()
 
     def provision_website(
         self,
