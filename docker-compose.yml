@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: infra/docker/orchestrator/Dockerfile
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -21,6 +22,7 @@ services:
     build:
       context: .
       dockerfile: infra/docker/admin-portal/Dockerfile
+    restart: unless-stopped
     ports:
       - "3000:80"
     depends_on:
@@ -30,6 +32,7 @@ services:
     build:
       context: .
       dockerfile: infra/docker/web-chat/Dockerfile
+    restart: unless-stopped
     ports:
       - "3001:80"
     depends_on:
@@ -39,6 +42,7 @@ services:
     build:
       context: .
       dockerfile: infra/docker/voice-console/Dockerfile
+    restart: unless-stopped
     ports:
       - "3002:80"
     depends_on:
@@ -46,6 +50,7 @@ services:
 
   chroma:
     image: chromadb/chroma:latest
+    restart: unless-stopped
     ports:
       - "8001:8000"
     volumes:
@@ -53,6 +58,7 @@ services:
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.105.0
+    restart: unless-stopped
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./infra/observability/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
@@ -63,6 +69,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.54.1
+    restart: unless-stopped
     command:
       - --config.file=/etc/prometheus/prometheus.yml
     volumes:
@@ -74,6 +81,7 @@ services:
 
   grafana:
     image: grafana/grafana:11.1.4
+    restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}

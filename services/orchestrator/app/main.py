@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.core.rate_limit import RateLimitMiddleware, SlidingWindowRateLimiter
 from app.observability.otel import configure_otel
 
 
@@ -20,6 +21,10 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    app.add_middleware(
+        RateLimitMiddleware,
+        limiter=SlidingWindowRateLimiter(max_requests=settings.rate_limit_requests_per_minute),
     )
     app.include_router(api_router, prefix="/api")
 

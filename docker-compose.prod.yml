@@ -1,0 +1,36 @@
+# Production overlay. Adds a Caddy reverse proxy that terminates HTTPS
+# (automatic Let's Encrypt certs) and stops publishing the orchestrator's
+# port directly to the internet - only Caddy is reachable from outside.
+#
+# Usage (on the production host, after DNS for PUBLIC_DOMAIN points at
+# this server's IP and .env has PUBLIC_DOMAIN set):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Everything else (services, volumes, env vars) is identical to dev - this
+# file only adds/overrides what's different in production.
+
+services:
+  orchestrator:
+    # Only reachable from this host (i.e. from the caddy container over the
+    # compose network) - not published to the internet directly anymore.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - orchestrator
+
+volumes:
+  caddy-data:
+  caddy-config:

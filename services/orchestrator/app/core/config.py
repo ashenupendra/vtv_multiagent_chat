@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_webhook_secret: str = Field(default="", alias="TELEGRAM_WEBHOOK_SECRET")
     telegram_website_id: str = Field(default="", alias="TELEGRAM_WEBSITE_ID")
+    rate_limit_requests_per_minute: int = Field(
+        default=30,
+        alias="RATE_LIMIT_REQUESTS_PER_MINUTE",
+    )
 
     @property
     def google_runtime(self) -> GoogleRuntimeSettings:
