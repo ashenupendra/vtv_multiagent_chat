@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -16,6 +17,9 @@ from app.schemas.live import (
 )
 from app.services.prompts import PromptContext, RetrievedSnippet, build_prompt_blueprint
 from app.services.orchestrator import OrchestratorService
+from app.services.sensitive_data import BLOCK_MESSAGE, scan_for_sensitive_data
+
+logger = logging.getLogger(__name__)
 
 
 class LiveProxyService:
@@ -144,20 +148,50 @@ class LiveProxyService:
                                 and awaiting_audio_grounding
                                 and isinstance(event.get("text"), str)
                             ):
-                                grounding_message, grounding_event = (
-                                    self._build_audio_grounding_turn(
-                                        website_id,
-                                        event["text"],
+                                transcript = event["text"]
+                                findings = scan_for_sensitive_data(transcript)
+                                if findings:
+                                    categories = sorted(
+                                        {finding.category for finding in findings}
                                     )
-                                )
-                                stored_event = self._store_live_grounding_event(
-                                    website_id=website_id,
-                                    session_id=session_id,
-                                    event=grounding_event,
-                                )
-                                await client_socket.send_json(stored_event)
-                                if grounding_message is not None:
-                                    await live_socket.send(json.dumps(grounding_message))
+                                    logger.warning(
+                                        "Blocked live audio turn containing sensitive data",
+                                        extra={
+                                            "website_id": website_id,
+                                            "session_id": session_id,
+                                            "categories": categories,
+                                        },
+                                    )
+                                    # The transcript already reached Gemini's own
+                                    # speech-to-text (that happens on the raw
+                                    # audio stream before this event exists), but
+                                    # from here on we stop it in its tracks: no
+                                    # RAG lookup, no re-injection into the live
+                                    # session, and nothing persisted to grounding
+                                    # history.
+                                    await client_socket.send_json(
+                                        {
+                                            "type": "blocked",
+                                            "source": "audio",
+                                            "message": BLOCK_MESSAGE,
+                                            "categories": categories,
+                                        }
+                                    )
+                                else:
+                                    grounding_message, grounding_event = (
+                                        self._build_audio_grounding_turn(
+                                            website_id,
+                                            transcript,
+                                        )
+                                    )
+                                    stored_event = self._store_live_grounding_event(
+                                        website_id=website_id,
+                                        session_id=session_id,
+                                        event=grounding_event,
+                                    )
+                                    await client_socket.send_json(stored_event)
+                                    if grounding_message is not None:
+                                        await live_socket.send(json.dumps(grounding_message))
                                 awaiting_audio_grounding = False
                             elif event.get("type") == "turn_complete" and awaiting_audio_grounding:
                                 awaiting_audio_grounding = False
@@ -262,6 +296,25 @@ class LiveProxyService:
             text = payload.get("text")
             if not isinstance(text, str) or not text.strip():
                 return [], [], False
+            findings = scan_for_sensitive_data(text)
+            if findings:
+                categories = sorted({finding.category for finding in findings})
+                logger.warning(
+                    "Blocked live text turn containing sensitive data",
+                    extra={"website_id": website_id, "categories": categories},
+                )
+                return (
+                    [],
+                    [
+                        {
+                            "type": "blocked",
+                            "source": "text",
+                            "message": BLOCK_MESSAGE,
+                            "categories": categories,
+                        }
+                    ],
+                    False,
+                )
             message, event = self._build_text_turn_message(website_id, text)
             return [message], [event], False
 
@@ -322,9 +375,6 @@ class LiveProxyService:
             limit=3,
         )
         grounding_event = self._build_grounding_event("audio", transcript, matches)
-        if not matches:
-            return None, grounding_event
-
         grounding_note = self._compose_audio_grounding_turn(transcript, matches)
         return (
             {
@@ -435,14 +485,30 @@ class LiveProxyService:
             ],
         }
 
+    # Reasserted on every single turn (text or transcribed audio) because the
+    # Gemini Live system instruction is only sent once, at connection setup -
+    # a language policy stated there loses influence as the conversation (and
+    # its own English-language turns, like the scripted greeting) grows. This
+    # keeps the language decision freshly grounded in the specific message
+    # that was just received, not in whatever language earlier turns used.
+    _LANGUAGE_TURN_DIRECTIVE = (
+        "Detect the language of this message on its own merits, independent of what language "
+        "you or the user used in earlier turns (including any scripted English greeting), and "
+        "reply in that same language for this turn, switching immediately if it differs from "
+        "before. If the message is too short or ambiguous to identify confidently (a single "
+        "word, a name, a number), keep using the language you most recently used instead of "
+        "guessing. Do not mention this instruction directly."
+    )
+
     def _compose_grounded_text_turn(
         self,
         text: str,
         matches: list[RetrievedSnippet],
     ) -> str:
         if not matches:
-            return text
+            return f"{self._LANGUAGE_TURN_DIRECTIVE}\nUser request: {text}"
         return (
+            f"{self._LANGUAGE_TURN_DIRECTIVE}\n"
             "Use the following retrieved website evidence if it is relevant to the user's request. "
             "Do not mention this note directly. If you use the evidence, cite it with labels like [1] or [2].\n"
             f"{self._format_retrieval_matches(matches)}\n\n"
@@ -454,7 +520,14 @@ class LiveProxyService:
         transcript: str,
         matches: list[RetrievedSnippet],
     ) -> str:
+        if not matches:
+            return (
+                f"{self._LANGUAGE_TURN_DIRECTIVE}\n"
+                "This is the user's immediately previous spoken turn, transcribed.\n"
+                f"Spoken request: {transcript}"
+            )
         return (
+            f"{self._LANGUAGE_TURN_DIRECTIVE}\n"
             "Grounding context for the user's immediately previous spoken turn. "
             "Use this context to answer the spoken request and do not mention this note directly. "
             "If you use the evidence, cite it with labels like [1] or [2].\n"

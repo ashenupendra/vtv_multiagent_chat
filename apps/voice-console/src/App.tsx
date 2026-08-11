@@ -18,6 +18,11 @@ import {
   SummaryBlock,
   TextArea,
 } from "@ira/ui";
+import {
+  logSensitiveDataBlocked,
+  scanForSensitiveData,
+  SENSITIVE_DATA_BLOCK_MESSAGE,
+} from "@ira/sensitive-data";
 
 import { VoiceAssistantPage } from "./VoiceAssistantPage";
 
@@ -73,7 +78,8 @@ type LiveServerEvent =
   | { type: "goaway"; payload: Record<string, unknown> }
   | { type: "usage"; payload: Record<string, unknown> }
   | { type: "error"; message: string }
-  | { type: "audio_chunk"; data: string; mimeType: string };
+  | { type: "audio_chunk"; data: string; mimeType: string }
+  | { type: "blocked"; source: string; message: string; categories: string[] };
 
 function VoiceConsoleDebug() {
   const [loading, setLoading] = useState(false);
@@ -375,6 +381,17 @@ function VoiceConsoleDebug() {
       case "audio_chunk":
         playAudioChunk(event.data);
         break;
+      case "blocked":
+        // Server-side backstop: catches sensitive content the local guard
+        // missed (e.g. spoken content the client's own detection couldn't
+        // intercept before Gemini's speech-to-text ran on it).
+        setError(event.message);
+        setTransportState("blocked");
+        appendTranscript(
+          "system",
+          `Blocked ${event.source} turn containing sensitive data (${event.categories.join(", ")}).`,
+        );
+        break;
       default:
         break;
     }
@@ -614,8 +631,16 @@ function VoiceConsoleDebug() {
 
   async function handleSendTranscript(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setLoading(true);
     setError(null);
+
+    const findings = scanForSensitiveData(transcriptDraft);
+    if (findings.length > 0) {
+      logSensitiveDataBlocked(findings, { app: "voice-console" });
+      setError(SENSITIVE_DATA_BLOCK_MESSAGE);
+      return;
+    }
+
+    setLoading(true);
 
     try {
       const socket = liveSocketRef.current;

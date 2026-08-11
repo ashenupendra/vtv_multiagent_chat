@@ -55,6 +55,20 @@ class OrchestrationResponse(BaseModel):
     observability_trace_id: str
 
 
+class ChatRequest(BaseModel):
+    website_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    history: list[ChatMessage] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    status: Literal["answered"]
+    reply: str
+    citations: list[CitationRecord] = Field(default_factory=list)
+    observability_trace_id: str
+
+
 class WebsiteOnboardingRequest(BaseModel):
     website_url: HttpUrl
     display_name: str = Field(min_length=2)

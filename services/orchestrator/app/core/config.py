@@ -37,6 +37,18 @@ class ObservabilitySettings(BaseModel):
     service_name: str
 
 
+class TelegramSettings(BaseModel):
+    bot_token_configured: bool
+    webhook_secret_configured: bool
+    website_id: str
+
+
+class WhatsAppSettings(BaseModel):
+    auth_token_configured: bool
+    account_sid_configured: bool
+    website_id: str
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -53,7 +65,7 @@ class Settings(BaseSettings):
     )
     default_agent_name: str = Field(default="ira-default", alias="IRA_DEFAULT_AGENT_NAME")
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
-    google_text_model: str = Field(default="gemini-2.5-flash", alias="GOOGLE_TEXT_MODEL")
+    google_text_model: str = Field(default="gemini-3.5-flash", alias="GOOGLE_TEXT_MODEL")
     google_live_model: str = Field(
         default="gemini-live-2.5-flash-preview",
         alias="GOOGLE_LIVE_MODEL",
@@ -89,6 +101,16 @@ class Settings(BaseSettings):
     )
     admin_token_ttl_seconds: int = Field(default=3600, alias="ADMIN_TOKEN_TTL_SECONDS")
     admin_token_issuer: str = Field(default="ira-orchestrator", alias="ADMIN_TOKEN_ISSUER")
+    telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
+    telegram_webhook_secret: str = Field(default="", alias="TELEGRAM_WEBHOOK_SECRET")
+    telegram_website_id: str = Field(default="", alias="TELEGRAM_WEBSITE_ID")
+    twilio_account_sid: str = Field(default="", alias="TWILIO_ACCOUNT_SID")
+    twilio_auth_token: str = Field(default="", alias="TWILIO_AUTH_TOKEN")
+    whatsapp_website_id: str = Field(default="", alias="WHATSAPP_WEBSITE_ID")
+    rate_limit_requests_per_minute: int = Field(
+        default=30,
+        alias="RATE_LIMIT_REQUESTS_PER_MINUTE",
+    )
 
     @property
     def google_runtime(self) -> GoogleRuntimeSettings:
@@ -134,6 +156,22 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins_raw.split(",") if origin.strip()]
+
+    @property
+    def telegram(self) -> TelegramSettings:
+        return TelegramSettings(
+            bot_token_configured=bool(self.telegram_bot_token),
+            webhook_secret_configured=bool(self.telegram_webhook_secret),
+            website_id=self.telegram_website_id,
+        )
+
+    @property
+    def whatsapp(self) -> WhatsAppSettings:
+        return WhatsAppSettings(
+            auth_token_configured=bool(self.twilio_auth_token),
+            account_sid_configured=bool(self.twilio_account_sid),
+            website_id=self.whatsapp_website_id,
+        )
 
 
 @lru_cache

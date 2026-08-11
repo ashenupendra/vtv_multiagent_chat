@@ -1,12 +1,18 @@
 import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 from uuid import uuid4
+
+import httpx
 
 from app.core.config import Settings
 from app.repositories.chroma import ChromaRepository, RAGDocumentRecord
 from app.schemas.orchestration import (
     AgentSelection,
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
     CitationRecord,
     CrawlJobCreateResponse,
     CrawlJobListResponse,
@@ -30,6 +36,9 @@ from app.schemas.orchestration import (
 from app.services.agents import AgentContext, TextChatAgent, VoiceProcessingAgent
 from app.services.crawler import WebsiteCrawler
 from app.services.prompts import PromptContext, RetrievedSnippet, build_prompt_blueprint
+from app.services.sensitive_data import SensitiveDataDetectedError, scan_for_sensitive_data
+
+logger = logging.getLogger(__name__)
 
 
 class OrchestratorService:
@@ -40,7 +49,32 @@ class OrchestratorService:
         self._voice_agent = VoiceProcessingAgent(settings.google_runtime.live_model)
         self._crawler = WebsiteCrawler()
 
-    def route_conversation(self, request: OrchestrationRequest) -> OrchestrationResponse:
+    def route_conversation(
+        self,
+        request: OrchestrationRequest,
+        *,
+        enforce_sensitive_filter: bool = True,
+    ) -> OrchestrationResponse:
+        # The sensitive-data filter protects real end-user Voice Chat and Text
+        # Chat traffic only. Admin Portal callers (e.g. the route preview tool
+        # used to inspect prompt/routing behavior) opt out via
+        # enforce_sensitive_filter=False - administrators may intentionally
+        # test with content that looks like PII, and that must never be
+        # blocked by the runtime conversation filter.
+        if enforce_sensitive_filter:
+            findings = scan_for_sensitive_data(request.message)
+            if findings:
+                logger.warning(
+                    "Blocked orchestration request containing sensitive data",
+                    extra={
+                        "website_id": request.website_id,
+                        "session_id": request.session_id,
+                        "mode": request.mode,
+                        "categories": sorted({finding.category for finding in findings}),
+                    },
+                )
+                raise SensitiveDataDetectedError(findings)
+
         context = AgentContext(
             website_id=request.website_id,
             session_id=request.session_id,
@@ -126,6 +160,88 @@ class OrchestratorService:
             fallback_message=plan.fallback_message,
             observability_trace_id=f"trace-{uuid4()}",
         )
+
+    def generate_reply(self, request: ChatRequest) -> ChatResponse:
+        """Real end-user Text Chat entry point: builds the routing/prompt plan
+        (which always enforces the sensitive-data filter for this path), then
+        actually calls Gemini to produce a reply, unlike route_conversation
+        which only returns the prompt/routing plan itself."""
+        route_response = self.route_conversation(
+            OrchestrationRequest(
+                mode="text",
+                website_id=request.website_id,
+                session_id=request.session_id,
+                message=request.message,
+                history=request.history,
+            )
+        )
+
+        reply_text = self._generate_text_reply(
+            model=route_response.route.default_model,
+            system_prompt=route_response.route.system_prompt or "",
+            history=request.history,
+            message=request.message,
+        )
+        if not reply_text.strip():
+            reply_text = route_response.fallback_message
+
+        return ChatResponse(
+            status="answered",
+            reply=reply_text,
+            citations=route_response.route.citations,
+            observability_trace_id=route_response.observability_trace_id,
+        )
+
+    def _generate_text_reply(
+        self,
+        model: str,
+        system_prompt: str,
+        history: list[ChatMessage],
+        message: str,
+    ) -> str:
+        if not self._settings.google_runtime.api_key_configured:
+            return "AI text generation is not configured (GOOGLE_API_KEY is missing)."
+
+        contents = [
+            {
+                "role": "model" if turn.role == "assistant" else "user",
+                "parts": [{"text": turn.content}],
+            }
+            for turn in history
+            if turn.role in ("user", "assistant")
+        ]
+        contents.append({"role": "user", "parts": [{"text": message}]})
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        try:
+            response = httpx.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self._settings.google_api_key,
+                },
+                json={
+                    "systemInstruction": {"parts": [{"text": system_prompt}]},
+                    "contents": contents,
+                },
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as error:
+            logger.error("Gemini text generation request failed", extra={"error": str(error)})
+            return ""
+
+        candidates = payload.get("candidates") if isinstance(payload, dict) else None
+        if not isinstance(candidates, list) or not candidates:
+            return ""
+        content = candidates[0].get("content") if isinstance(candidates[0], dict) else None
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            return ""
+        return "".join(
+            part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ).strip()
 
     def provision_website(
         self,

@@ -1,7 +1,44 @@
 ﻿import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createIraApiClient, type LiveConfigResponse } from "@ira/agents-sdk";
+import {
+  logSensitiveDataBlocked,
+  scanForSensitiveData,
+  SENSITIVE_DATA_BLOCK_MESSAGE,
+} from "@ira/sensitive-data";
 import irasLogo from "./assets/iras-logo.svg";
+
+// The Web Speech API (used below purely as a local, best-effort safety net)
+// isn't part of TypeScript's DOM lib, so it's typed minimally here rather
+// than pulling in a third-party types package for a handful of members.
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  length: number;
+  [index: number]: { transcript: string };
+};
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+};
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: unknown) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+function getSpeechRecognitionCtor(): SpeechRecognitionConstructor | null {
+  const globalWindow = window as typeof window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return globalWindow.SpeechRecognition ?? globalWindow.webkitSpeechRecognition ?? null;
+}
 
 type ConnectionState = "idle" | "connecting" | "connected" | "closed" | "error";
 type ListeningState = "idle" | "listening";
@@ -24,7 +61,8 @@ type LiveServerEvent =
   | { type: "goaway"; payload: Record<string, unknown> }
   | { type: "usage"; payload: Record<string, unknown> }
   | { type: "error"; message: string }
-  | { type: "audio_chunk"; data: string; mimeType: string };
+  | { type: "audio_chunk"; data: string; mimeType: string }
+  | { type: "blocked"; source: string; message: string; categories: string[] };
 
 const fixedWebsiteId = "iras-128e32";
 const sensitivityConfig: Record<SensitivityLevel, { threshold: number; frames: number }> = {
@@ -74,6 +112,16 @@ export function VoiceAssistantPage() {
   const captureContextRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+
+  // Best-effort, client-side safety net: a local speech recognizer runs
+  // alongside the raw mic stream purely to catch sensitive-looking speech
+  // early. It cannot guarantee zero audio bytes reach Gemini before it
+  // fires (recognition lags the live stream by roughly its own latency),
+  // but the moment it does fire, further audio_chunk sends for this
+  // session stop. The backend also re-checks Gemini's own transcript as a
+  // second, more reliable backstop (see the "blocked" server event).
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const sensitiveBlockedRef = useRef(false);
 
   const playbackContextRef = useRef<AudioContext | null>(null);
   const assistantSpeechTimeoutRef = useRef<number | null>(null);
@@ -186,6 +234,59 @@ export function VoiceAssistantPage() {
     if (micLevelTimeoutRef.current) {
       window.clearTimeout(micLevelTimeoutRef.current);
       micLevelTimeoutRef.current = null;
+    }
+    stopSensitiveSpeechMonitor();
+  }
+
+  function startSensitiveSpeechMonitor() {
+    const RecognitionCtor = getSpeechRecognitionCtor();
+    if (!RecognitionCtor) {
+      logVoiceState("sensitive-data voice monitor unavailable: browser lacks SpeechRecognition");
+      return;
+    }
+    try {
+      const recognition = new RecognitionCtor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+      recognition.onresult = (event) => {
+        let combined = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          combined += event.results[index][0]?.transcript ?? "";
+        }
+        if (!combined.trim() || sensitiveBlockedRef.current) {
+          return;
+        }
+        const findings = scanForSensitiveData(combined);
+        if (findings.length > 0) {
+          sensitiveBlockedRef.current = true;
+          logSensitiveDataBlocked(findings, { app: "voice-console", channel: "voice" });
+          setError(SENSITIVE_DATA_BLOCK_MESSAGE);
+        }
+      };
+      recognition.onerror = () => {
+        // Local safety net only - failures here don't affect the live
+        // session; the backend transcript gate remains as defense in depth.
+      };
+      recognition.start();
+      speechRecognitionRef.current = recognition;
+    } catch {
+      logVoiceState("failed to start sensitive-data voice monitor");
+    }
+  }
+
+  function stopSensitiveSpeechMonitor() {
+    const recognition = speechRecognitionRef.current;
+    speechRecognitionRef.current = null;
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+      try {
+        recognition.stop();
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -337,7 +438,10 @@ export function VoiceAssistantPage() {
     socket.send(
       JSON.stringify({
         type: "text",
-        text: `Say "${inactivityFollowUpText}" and then wait for the user response.`,
+        text:
+          `Say "${inactivityFollowUpText}" and then wait for the user response. ` +
+          "Say this in whatever language the conversation has been using so far, not English, " +
+          "unless the conversation has genuinely been in English.",
       }),
     );
     clearFollowUpCountdownCeiling();
@@ -560,6 +664,12 @@ export function VoiceAssistantPage() {
           assistantFinalizeTimeoutRef.current = null;
         }
         break;
+      case "blocked":
+        // Server-side backstop: catches sensitive speech the local
+        // best-effort recognizer missed before Gemini transcribed it.
+        setError(event.message);
+        setAwaitingResponse(false);
+        break;
       default:
         break;
     }
@@ -694,6 +804,7 @@ export function VoiceAssistantPage() {
     setAwaitingResponse(false);
     setTranscriptLog([]);
     resetTurnDetection();
+    sensitiveBlockedRef.current = false;
     const resolvedWebsiteId = fixedWebsiteId;
     const stream = await ensureMicrophone();
     await ensureSession(resolvedWebsiteId);
@@ -709,7 +820,13 @@ export function VoiceAssistantPage() {
     socket.send(
       JSON.stringify({
         type: "text",
-        text: `Say "${sessionGreetingText}" and then wait for the user response.`,
+        text:
+          `Say "${sessionGreetingText}" and then wait for the user response. ` +
+          "This greeting is in English only for branding reasons and does not set or lock the " +
+          "conversation's language - the moment the user replies, detect the language of that " +
+          "reply on its own merits and respond in that language from then on, even though the " +
+          "greeting was in English, and keep switching languages on every later turn to match " +
+          "whatever the user speaks.",
       }),
     );
     greetingTurnActiveRef.current = true;
@@ -815,13 +932,17 @@ export function VoiceAssistantPage() {
       // Gemini Live's own server-side voice activity detection segments turns and
       // drives interruption; sending audio_end mid-conversation would close its
       // input stream early and silently drop audio sent right after a barge-in.
-      socket.send(
-        JSON.stringify({
-          type: "audio_chunk",
-          data: int16ToBase64(downsampled),
-          mimeType: "audio/pcm;rate=16000",
-        }),
-      );
+      // Skipped once the local sensitive-data monitor has fired, so no further
+      // audio for this session reaches Gemini.
+      if (!sensitiveBlockedRef.current) {
+        socket.send(
+          JSON.stringify({
+            type: "audio_chunk",
+            data: int16ToBase64(downsampled),
+            mimeType: "audio/pcm;rate=16000",
+          }),
+        );
+      }
     };
 
     source.connect(processor);
@@ -831,6 +952,7 @@ export function VoiceAssistantPage() {
     sourceNodeRef.current = source;
     processorNodeRef.current = processor;
 
+    startSensitiveSpeechMonitor();
     setListeningState("listening");
   }
 

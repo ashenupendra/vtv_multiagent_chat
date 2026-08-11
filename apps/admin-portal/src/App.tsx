@@ -482,17 +482,23 @@ export default function App() {
     setRouteResult(null);
 
     try {
+      if (!token) {
+        throw new Error("Login is required before testing route behavior.");
+      }
       if (!resolvedWebsiteId) {
         throw new Error("Set an active website ID before testing route behavior.");
       }
 
-      const response = await publicClient.routeConversation({
+      // Admin Portal is exempt from the runtime sensitive-data filter (it
+      // protects end-user Voice/Text Chat only), so this intentionally goes
+      // through the admin-authenticated preview endpoint rather than the
+      // public routeConversation used by real chat traffic.
+      const response = await authenticatedClient.previewRouteConversation({
         mode: routeForm.mode as "text" | "voice",
         website_id: resolvedWebsiteId,
         session_id: "admin-portal-test-session",
         message: routeForm.message,
         history: [],
-        language_hint: "en-US",
       });
       setRouteResult(response);
     } catch (routeError) {
