@@ -53,6 +53,29 @@ every restart, unlike dev):
 ./scripts/register-telegram-webhook.sh https://api.yoursite.com
 ```
 
+## WhatsApp (via Twilio)
+
+Same underlying setup as Telegram - same tunnel/domain, same orchestrator,
+different webhook path and a different way to register it.
+
+1. In the [Twilio console](https://console.twilio.com), get
+   `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` and put them in `.env`, along
+   with `WHATSAPP_WEBSITE_ID`.
+2. For testing: join the WhatsApp Sandbox (Messaging → Try it out → Send a
+   WhatsApp message), then under Sandbox Settings paste your webhook URL
+   into **"WHEN A MESSAGE COMES IN"**:
+   ```
+   https://<your-public-url>/api/whatsapp/webhook
+   ```
+   (dev: the cloudflared tunnel URL; prod: `https://api.yoursite.com`)
+3. There's no API call for this step (unlike Telegram's `setWebhook`) - it's
+   set directly in the Twilio console UI, both for the sandbox and later for
+   a real approved WhatsApp business number.
+4. Production: rotate nothing extra here - `TWILIO_AUTH_TOKEN` is what
+   verifies incoming requests are really from Twilio (equivalent to
+   Telegram's webhook secret), so just keep it out of source control same as
+   the other secrets in `.env`.
+
 ## What's different between them
 
 | | Dev | Production |
@@ -68,8 +91,8 @@ every restart, unlike dev):
   reboot or crash without manual intervention.
 - Rate limiting (`RATE_LIMIT_REQUESTS_PER_MINUTE` in `.env`) on the public
   chat/route/login endpoints, to limit abuse cost once a URL is public.
-- The sensitive-data filter on all Text/Voice Chat and Telegram traffic
-  (never on Admin Portal).
+- The sensitive-data filter on all Text/Voice Chat, Telegram, and WhatsApp
+  traffic (never on Admin Portal).
 
 ## Not yet covered (only matters if you scale beyond one server)
 

@@ -6,6 +6,8 @@ httpx==0.28.1
 beautifulsoup4==4.12.3
 playwright==1.54.0
 websockets==15.0.1
+twilio==9.10.9
+python-multipart==0.0.32
 opentelemetry-api==1.30.0
 opentelemetry-sdk==1.30.0
 opentelemetry-exporter-otlp==1.30.0

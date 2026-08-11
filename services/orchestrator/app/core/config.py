@@ -43,6 +43,12 @@ class TelegramSettings(BaseModel):
     website_id: str
 
 
+class WhatsAppSettings(BaseModel):
+    auth_token_configured: bool
+    account_sid_configured: bool
+    website_id: str
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -98,6 +104,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
     telegram_webhook_secret: str = Field(default="", alias="TELEGRAM_WEBHOOK_SECRET")
     telegram_website_id: str = Field(default="", alias="TELEGRAM_WEBSITE_ID")
+    twilio_account_sid: str = Field(default="", alias="TWILIO_ACCOUNT_SID")
+    twilio_auth_token: str = Field(default="", alias="TWILIO_AUTH_TOKEN")
+    whatsapp_website_id: str = Field(default="", alias="WHATSAPP_WEBSITE_ID")
     rate_limit_requests_per_minute: int = Field(
         default=30,
         alias="RATE_LIMIT_REQUESTS_PER_MINUTE",
@@ -154,6 +163,14 @@ class Settings(BaseSettings):
             bot_token_configured=bool(self.telegram_bot_token),
             webhook_secret_configured=bool(self.telegram_webhook_secret),
             website_id=self.telegram_website_id,
+        )
+
+    @property
+    def whatsapp(self) -> WhatsAppSettings:
+        return WhatsAppSettings(
+            auth_token_configured=bool(self.twilio_auth_token),
+            account_sid_configured=bool(self.twilio_account_sid),
+            website_id=self.whatsapp_website_id,
         )
 
 
